@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.edit_ledger import EditLedger
+
 
 @dataclass
 class SessionMemory:
@@ -20,6 +22,7 @@ class SessionMemory:
     human_preferences: list[str] = field(default_factory=list)
     completed_edits: list[dict[str, Any]] = field(default_factory=list)
     chapter_notes: dict[str, str] = field(default_factory=dict)
+    edit_ledger: EditLedger = field(default_factory=EditLedger)
 
     def to_dict(self) -> dict:
         return {
@@ -33,6 +36,7 @@ class SessionMemory:
             "human_preferences": self.human_preferences,
             "completed_edits": self.completed_edits[-50:],
             "chapter_notes": self.chapter_notes,
+            "edit_ledger": self.edit_ledger.to_dict(),
         }
 
     @classmethod
@@ -50,6 +54,9 @@ class SessionMemory:
             human_preferences=list(data.get("human_preferences", [])),
             completed_edits=list(data.get("completed_edits", [])),
             chapter_notes=dict(data.get("chapter_notes", {})),
+            edit_ledger=EditLedger.from_dict(data.get("edit_ledger"))
+            if data.get("edit_ledger")
+            else EditLedger.from_completed_edits(list(data.get("completed_edits", []))),
         )
 
     def apply_brief(self, brief_data: dict) -> None:
@@ -61,12 +68,21 @@ class SessionMemory:
             self.style_brief = "; ".join(notes[:5])
 
     def record_edit(self, *, chapter_id: str, action: str, description: str, at_sec: float | None = None) -> None:
-        self.completed_edits.append({
+        entry = {
             "chapter_id": chapter_id,
             "action": action,
             "description": description,
             "at_sec": at_sec,
-        })
+            "status": "applied",
+        }
+        self.completed_edits.append(entry)
+        self.edit_ledger.record(
+            action=action,
+            description=description,
+            chapter_id=chapter_id,
+            at_sec=at_sec,
+            status="applied",
+        )
 
     def record_chapter_planned(self, chapter_id: str, task_count: int, notes: str = "") -> None:
         self.chapter_notes[chapter_id] = f"Planned {task_count} task(s). {notes}".strip()
@@ -88,4 +104,8 @@ class SessionMemory:
             lines.append(f"- Avoid: {', '.join(self.avoid)}")
         if self.human_preferences:
             lines.append(f"- Human likes: {', '.join(self.human_preferences[:5])}")
+        ledger_block = self.edit_ledger.summary(max_lines=8)
+        if ledger_block:
+            lines.append("")
+            lines.append(ledger_block)
         return "\n".join(lines)
