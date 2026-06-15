@@ -16,6 +16,7 @@ from agent.streaming import EventEmitter
 from capcut.reader import get_project_summary
 from core.chapters import Chapter, chapter_timeline_slice
 from core.models import Goal, Task
+from core.retrieve_context import retrieve_context
 from core.session_memory import SessionMemory
 
 logger = logging.getLogger(__name__)
@@ -50,15 +51,21 @@ def run_scene_planner(
   if slice_data["clip_count"] == 0 and chapter.index > 1:
     return [], [f"No video clips in {chapter.label} ({chapter.start_sec:.0f}–{chapter.end_sec:.0f}s) — skipped."]
 
+  retrieved = retrieve_context(
+    project_path,
+    user_message,
+    chapter=chapter,
+    ledger=memory.edit_ledger,
+  )
+
   goals_block = json.dumps([g.to_dict() for g in goals], indent=2)
   context = (
     f"{memory.prompt_block()}\n\n"
     f"CREATIVE BRIEF:\n{json.dumps(brief.to_dict(), indent=2)}\n\n"
-    f"CHAPTER (plan ONLY edits inside this time range):\n"
-    f"{json.dumps(slice_data, indent=2)}\n\n"
+    f"{retrieved.to_prompt_block()}\n\n"
     f"GOALS (session-wide):\n{goals_block}\n\n"
     f"ORIGINAL REQUEST:\n{user_message}\n\n"
-    "Use segment_id and text_id ONLY from CHAPTER video_clips/text_overlays above."
+    "Use segment_id and text_id ONLY from WORKING SLICE above."
   )
 
   result = run_agent(

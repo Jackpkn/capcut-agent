@@ -61,6 +61,34 @@ PRESETS: dict[str, dict] = {
         "max_clip_sec": 6,
         "caption_style": "optional",
     },
+    "blog": {
+        "label": "Blog-style video",
+        "keywords": ("blog", "blogger", "article", "newsletter", "substack"),
+        "mood": "conversational",
+        "speed": 1.0,
+        "speed_clips": "all",
+        "transition_query": "fade",
+        "music_search": ("acoustic", "chill", "soft", "ambient", "lo-fi"),
+        "replace_music": True,
+        "captions": True,
+        "hook_style": "slow_build",
+        "max_clip_sec": 10,
+        "caption_style": "blog captions — short sentences, bullet-style overlays, readable",
+    },
+    "custom": {
+        "label": "Custom edit",
+        "keywords": (),
+        "mood": "balanced",
+        "speed": 1.0,
+        "speed_clips": "all",
+        "transition_query": "fade",
+        "music_search": ("chill", "acoustic", "ambient"),
+        "replace_music": False,
+        "captions": True,
+        "hook_style": "best_moment_first",
+        "max_clip_sec": 8,
+        "caption_style": "clear, readable overlays",
+    },
 }
 
 
@@ -120,18 +148,30 @@ def build_edit_brief(
 ) -> EditBrief:
     from agent.preset_config import effective_preset_config
 
-    preset_id = preset_id or detect_preset(user_message) or "energetic"
+    preset_id = preset_id or "custom"
     cfg = effective_preset_config(preset_id, user_message)
     clips = summary.get("video_clips", [])
     hook_clip = _pick_hook_clip(clips, cfg.get("hook_style", "energy_burst"))
     hook_idx = hook_clip.get("index", 1) if hook_clip else 1
     hook_name = hook_clip.get("name", f"clip {hook_idx}") if hook_clip else "opening"
 
-    platform = "TikTok / Reels"
-    if preset_id == "cinematic":
+    platform = "YouTube / blog"
+    if preset_id == "tiktok_viral":
+        platform = "TikTok / Reels"
+    elif preset_id == "cinematic":
         platform = "YouTube / long-form"
     elif preset_id == "travel_vlog":
         platform = "Instagram + YouTube travel"
+    elif preset_id == "energetic":
+        platform = "TikTok / Reels"
+    elif preset_id == "blog":
+        platform = "YouTube / blog / newsletter"
+
+    audience = f"{platform} viewers"
+    if preset_id == "blog":
+        audience = "Blog audience — informative, relaxed, conversational"
+    elif preset_id in ("tiktok_viral", "energetic"):
+        audience = f"{platform} viewers — scroll-stopping content"
 
     notes = [
         f"Preset: **{cfg['label']}** — {cfg['mood']} mood",
@@ -145,7 +185,7 @@ def build_edit_brief(
     return EditBrief(
         preset_id=preset_id,
         preset_label=cfg["label"],
-        audience=f"{platform} viewers — scroll-stopping travel/content",
+        audience=audience,
         hook=f"Lead with **{hook_name}** (clip {hook_idx}) — strongest visual in first 1–2s",
         arc=_arc_for_preset(preset_id, len(clips)),
         music_direction=f"{cfg['mood']} bed — search: {', '.join(cfg['music_search'])}",
@@ -156,6 +196,8 @@ def build_edit_brief(
 
 
 def _arc_for_preset(preset_id: str, clip_count: int) -> str:
+    if preset_id == "blog":
+        return "Intro → main points → examples/B-roll → soft outro (conversational pacing)"
     if preset_id == "travel_vlog":
         return "Establish place → highlights → people/food → golden moment → soft outro"
     if preset_id == "tiktok_viral":
