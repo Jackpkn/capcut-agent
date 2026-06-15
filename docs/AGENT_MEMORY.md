@@ -43,6 +43,12 @@ Hierarchical reflexive multi-agent for CapCut — not one LLM dumping JSON.
 - Chapter chips in live trace + TeamPlanCard.
 - **`editor_timeline`** SSE → `EditorTimelineReport` in chat (video strip, waveform, suggestions) — pro editor style.
 
+## Next (in progress)
+
+- **TimelineIndex** + **retrieve_context** — search timeline before each LLM call (`core/timeline_index.py`, `core/retrieve_context.py`)
+- **EditLedger** — compact session edit log (`core/edit_ledger.py`)
+- **Draft operation engine** — `capcut/draft_ops.py` + `propose_draft_operations` tool
+
 ## Next (not built yet)
 
 - Phase B: task `depends_on` topological execution
