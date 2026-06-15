@@ -16,6 +16,36 @@ from agent.brain import (
 )
 ToolHandler = Callable[[dict], str]
 
+_TOOL_ALIASES = {
+    "search": "search_library",
+    "google_search": "search_library",
+    "web_search": "search_library",
+    "library_search": "search_library",
+    "director_picks": "get_director_picks",
+}
+
+
+def normalize_tool_name(name: str) -> str:
+    """Map hallucinated or prefixed tool names to registered tools."""
+    raw = (name or "").split("<|")[0].strip()
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1].strip()
+    if raw and not raw.startswith("propose_"):
+        candidate = f"propose_{raw}"
+        if candidate in PROPOSE_TO_ACTION:
+            return candidate
+    if ":" in raw:
+        suffix = raw.split(":")[-1].strip()
+        if suffix in _TOOL_ALIASES:
+            return _TOOL_ALIASES[suffix]
+        if suffix in IMMEDIATE_TOOLS or suffix in PROPOSE_TO_ACTION:
+            return suffix
+        if suffix.startswith("propose_"):
+            return suffix
+    if raw in _TOOL_ALIASES:
+        return _TOOL_ALIASES[raw]
+    return raw
+
 
 def to_responses_tools(tool_defs: list[dict]) -> list[dict]:
     return [
@@ -120,7 +150,7 @@ SUBMIT_GOALS_TOOL = {
                 },
                 "preset_hint": {
                     "type": "string",
-                    "description": "When intent=edit: travel_vlog, cinematic, tiktok_viral, energetic, or custom",
+                    "description": "When intent=edit: blog, travel_vlog, cinematic, tiktok_viral, energetic, or custom",
                 },
                 "brief_markdown": {
                     "type": "string",
