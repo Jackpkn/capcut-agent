@@ -12,20 +12,21 @@ from agent.streaming import EventEmitter, step as emit_step
 logger = logging.getLogger(__name__)
 
 ORCHESTRATOR_INSTRUCTIONS = """You are the CapCut orchestrator. Read the human message (any language) and project snapshot.
-Call route_request exactly once.
+Call route_request exactly once. You decide — there are no keyword rules.
 
 ## Modes
-- **answer**: Questions, inspection, advice, timeline **visuals** ("show captions on timeline", "where do captions sit"), **project scan** / health review. No timeline writes.
+- **answer**: Greetings, questions, inspection, advice, timeline **visuals**, project scan. No timeline writes.
 - **edit**: Focused changes — one area or a few related tweaks (fix a caption, add music, one transition, speed one clip).
-- **team**: Large coordinated re-edits on long or multi-clip timelines — pacing + music + captions + FX across many clips.
-  Team agents work **one after another** on the same timeline (never parallel). Use team when scope is genuinely big/complex.
+- **team**: Large coordinated re-edits — pacing + music + captions + FX across many clips.
+  Team agents work **one after another** on the same timeline (never parallel).
 
-## Team signals (not rules — use judgment)
-- Long timeline (high duration_sec) or many video clips needing coordinated style
-- Full vibe / platform packages ("make this a TikTok travel vlog", "cinematic re-edit everything")
-- NOT for simple Q&A, timeline visuals, project scan, or a single small change
+## Routing judgment (your call — no code shortcuts)
+- Casual chat or thanks with no edit ask → **answer**
+- Style/vibe requests on **short** timelines (few clips, low duration_sec) → **edit** (single agent is enough)
+- **team** only for long multi-chapter re-edits or explicit "re-edit everything" scope
+- In `reason`, summarize the **user's actual words** — never copy example phrases from these instructions
 
-Set ui_label to a short phrase for the UI (e.g. "Answering from timeline", "Timeline visual", "Edit agent", "Sequential team")."""
+Set ui_label to a short phrase for the UI."""
 
 ROUTE_TOOL = [{
     "type": "function",
@@ -70,15 +71,22 @@ def _parse_route(response) -> RouteDecision | None:
         mode = (args.get("mode") or "edit").lower()
         if mode not in ("answer", "edit", "team"):
             mode = "edit"
+        ui_label = str(args.get("ui_label") or mode).strip()
+        if len(ui_label) > 48 or ui_label.count(" ") > 6:
+            ui_label = {"answer": "Chat", "edit": "Edit agent", "team": "Team"}.get(mode, mode)
         return RouteDecision(
             mode=mode,
             reason=args.get("reason") or "",
-            ui_label=args.get("ui_label") or mode,
+            ui_label=ui_label,
         )
     return None
 
 
-def _llm_route(message: str, timeline_summary: dict) -> RouteDecision | None:
+def _llm_route(
+    message: str,
+    timeline_summary: dict,
+    emit: EventEmitter | None = None,
+) -> RouteDecision | None:
     context = json.dumps(timeline_summary, indent=2)
     input_items = [{
         "role": "user",
@@ -89,8 +97,10 @@ def _llm_route(message: str, timeline_summary: dict) -> RouteDecision | None:
             instructions=ORCHESTRATOR_INSTRUCTIONS,
             input_items=input_items,
             tools=ROUTE_TOOL,
-            temperature=0.2,
-            max_output_tokens=512,
+            temperature=0.1,
+            max_output_tokens=256,
+            agent="orchestrator",
+            emit=emit,
         )
     except Exception as exc:
         logger.warning("Orchestrator failed: %s", exc)
@@ -100,12 +110,23 @@ def _llm_route(message: str, timeline_summary: dict) -> RouteDecision | None:
     return _parse_route(response)
 
 
+def _looks_like_edit_request(message: str) -> bool:
+    m = message.lower()
+    markers = (
+        "transition", "music", "caption", "effect", "trim", "speed",
+        "add ", "remove", "change", "make it", "make this", "better",
+        "improve", "reorder", "sticker", "image", "anything",
+    )
+    return any(w in m for w in markers)
+
+
 def decide_route(
     message: str,
     timeline_summary: dict,
     project_path: str | None,
     *,
     force_team: bool = False,
+    auto_edit: bool = False,
     emit: EventEmitter | None = None,
 ) -> RouteDecision:
     if not project_path:
@@ -115,15 +136,36 @@ def decide_route(
             ui_label="Chat",
         )
 
+    if auto_edit:
+        emit_step(
+            emit, "orchestrator", "Auto edit (pro)", "done",
+            "Full hierarchical edit — Director plans all chapters, one approve at the end.",
+        )
+        return RouteDecision(
+            mode="team",
+            reason=(
+                "Auto edit — sequential team workflow across every chapter "
+                "(pacing, music, captions, transitions)."
+            ),
+            ui_label="Auto edit (pro)",
+        )
+
     parsed: RouteDecision | None = None
     if llm_available():
         emit_step(emit, "orchestrator", "Understanding what you need…")
-        parsed = _llm_route(message, timeline_summary)
+        parsed = _llm_route(message, timeline_summary, emit=emit)
 
-    # Questions / visuals / scan always use single agent (present_timeline + full project JSON)
+    # Questions / visuals / scan — unless the user clearly asked for an edit
     if parsed and parsed.mode == "answer":
-        emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
-        return parsed
+        if _looks_like_edit_request(message):
+            parsed = RouteDecision(
+                mode="edit",
+                reason=parsed.reason or "Edit request detected in your message.",
+                ui_label="Edit agent",
+            )
+        else:
+            emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
+            return parsed
 
     if force_team:
         emit_step(
@@ -144,29 +186,13 @@ def decide_route(
             ui_label="Edit agent",
         )
 
-    duration = float(timeline_summary.get("duration_sec") or 0)
-    clip_count = int(timeline_summary.get("video_clip_count") or 0)
-    if duration > 180 or clip_count > 8:
-        emit_step(
-            emit, "orchestrator", "Long timeline — team recommended", "done",
-            f"{duration:.0f}s, {clip_count} clips",
-        )
-        return RouteDecision(
-            mode="team",
-            reason=(
-                f"Long timeline ({duration:.0f}s, {clip_count} clips) — "
-                "hierarchical chapter-based team workflow."
-            ),
-            ui_label="Sequential team (long project)",
-        )
-
     if parsed is not None:
         emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
         return parsed
 
-    emit_step(emit, "orchestrator", "Edit agent", "done", "Defaulting to edit agent")
+    emit_step(emit, "orchestrator", "Edit agent", "done", "Could not classify — using edit agent")
     return RouteDecision(
         mode="edit",
-        reason="Could not classify — using the edit agent.",
+        reason="Orchestrator could not classify — using the edit agent.",
         ui_label="Edit agent",
     )
