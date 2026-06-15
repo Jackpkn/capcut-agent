@@ -90,6 +90,9 @@ def _apply_now(item: QueuedApply) -> None:
     try:
         results = execute_actions(item.actions, item.project_path)
         sync_capcut(item.project_path)
+        from core.project_ledger import record_applied_edits
+
+        record_applied_edits(item.project_path, item.actions)
         item.results = results
         item.status = "done"
         item.message = format_execute_reply(results)

@@ -11,11 +11,17 @@ _sessions: dict[str, EditSession] = {}
 _paused: set[str] = set()
 
 
-def start_session(project_path: str, human_message: str) -> EditSession:
+def start_session(
+    project_path: str,
+    human_message: str,
+    *,
+    auto_edit: bool = False,
+) -> EditSession:
     session = EditSession(
         id=new_id(),
         project_path=project_path,
         human_message=human_message,
+        auto_edit=auto_edit,
     )
     _sessions[session.id] = session
     return session
