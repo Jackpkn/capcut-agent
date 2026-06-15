@@ -11,6 +11,7 @@ from agent.brain import PendingAction
 from agent.runtime.model import call_model
 from agent.runtime.tools import (
     ORCHESTRATION_TOOL_NAMES,
+    normalize_tool_name,
     propose_from_call,
     run_immediate_tool,
     to_responses_tools,
@@ -25,6 +26,7 @@ from agent.streaming import (
     tool_result as emit_tool_result,
 )
 from agent.brain import IMMEDIATE_TOOLS, PROPOSE_TO_ACTION
+from agent.runtime.agent_log import agent as log_agent
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ def _parse_calls(response) -> tuple[str, list[dict]]:
 
     for item in response.output:
         if item.type == "function_call":
-            tool_name = (item.name or "").split("<|")[0].strip()
+            tool_name = normalize_tool_name(item.name or "")
             try:
                 args = json.loads(item.arguments)
             except json.JSONDecodeError:
@@ -150,6 +152,8 @@ def run_agent(
             input_items=input_items,
             tools=responses_tools,
             temperature=config.temperature,
+            agent=config.name,
+            emit=emit,
         )
         if response is None:
             emit_step(
@@ -173,6 +177,7 @@ def run_agent(
         immediate_calls: list[dict] = []
         propose_calls: list[dict] = []
         orch_calls: list[dict] = []
+        unknown_calls: list[dict] = []
 
         for call in calls:
             name = call["name"]
@@ -184,10 +189,29 @@ def run_agent(
                 propose_calls.append(call)
             else:
                 logger.warning("%s: unknown tool %s", config.name, name)
+                unknown_calls.append(call)
 
         _append_response_to_input(input_items, response)
 
+        allowed = sorted(config.tool_names | config.orchestration_names | IMMEDIATE_TOOLS)
+        for call in unknown_calls:
+            emit_tool_call(emit, call["name"], call["args"])
+            err = json.dumps({
+                "error": f"Tool {call['name']!r} does not exist.",
+                "hint": "Use search_library (not google:search), get_director_picks, or propose_* tools.",
+                "allowed": allowed[:12],
+            })
+            emit_tool_result(emit, call["name"], f"Unknown tool — use search_library or propose_*")
+            tool_trace.append({"tool": call["name"], "args": call["args"], "kind": "error"})
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": call["call_id"],
+                "name": call["name"],
+                "output": err,
+            })
+
         for call in orch_calls:
+            log_agent("tool", agent=config.name, name=call["name"])
             emit_tool_call(emit, call["name"], call["args"])
             orchestration[call["name"]] = call["args"]
             tool_trace.append({"tool": call["name"], "args": call["args"], "kind": "orchestration"})
@@ -200,6 +224,7 @@ def run_agent(
             })
 
         for call in immediate_calls:
+            log_agent("tool", agent=config.name, name=call["name"], kind="immediate")
             emit_tool_call(emit, call["name"], call["args"])
             output = run_immediate_tool(
                 call["name"],
@@ -218,6 +243,7 @@ def run_agent(
             })
 
         for call in propose_calls:
+            log_agent("tool", agent=config.name, name=call["name"], kind="propose")
             emit_tool_call(emit, call["name"], call["args"])
             result = propose_from_call(call["name"], call["args"])
             if result is None:
@@ -256,7 +282,7 @@ def run_agent(
                 turns_used=turn + 1,
             )
 
-        if immediate_calls or orch_calls:
+        if immediate_calls or orch_calls or unknown_calls:
             continue
 
         emit_step(emit, f"{agent_slug}_turn_{turn}", "Turn complete", "done")
