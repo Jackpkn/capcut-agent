@@ -26,8 +26,16 @@ def run_director(
     timeline_summary: dict,
     project_path: str,
     emit=None,
+    *,
+    auto_edit: bool = False,
 ) -> DirectorResult | None:
     """Director LLM (strategic). Returns None if model unavailable."""
     from agent.agents.director_agent import run_llm_director
 
-    return run_llm_director(user_message, timeline_summary, project_path, emit=emit)
+    return run_llm_director(
+        user_message,
+        timeline_summary,
+        project_path,
+        emit=emit,
+        auto_edit=auto_edit,
+    )

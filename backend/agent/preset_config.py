@@ -9,9 +9,17 @@ from capcut.catalog import search_catalog
 
 
 def effective_preset_config(preset_id: str, user_message: str) -> dict:
-    """Merge preset with message-specific overrides (e.g. cinematic + travel vlog)."""
-    cfg = copy.deepcopy(PRESETS.get(preset_id, PRESETS["energetic"]))
+    """Merge preset with message-specific overrides (e.g. blog, cinematic + travel)."""
     lower = user_message.lower()
+    if preset_id == "custom":
+        if any(kw in lower for kw in ("blog", "blogger", "article", "newsletter")):
+            preset_id = "blog"
+        elif any(kw in lower for kw in ("cinematic", "film", "movie")):
+            preset_id = "cinematic"
+        elif any(kw in lower for kw in ("tiktok", "reels", "viral")):
+            preset_id = "tiktok_viral"
+
+    cfg = copy.deepcopy(PRESETS.get(preset_id, PRESETS["custom"]))
 
     if preset_id == "travel_vlog" and "cinematic" in lower:
         cfg["label"] = "Cinematic travel vlog"
