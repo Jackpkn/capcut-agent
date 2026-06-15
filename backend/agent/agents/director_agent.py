@@ -7,7 +7,7 @@ import logging
 
 from agent.agents.definitions import director_config
 from agent import brain as brain_module
-from agent.director import EditBrief, build_edit_brief, detect_preset
+from agent.director import EditBrief, build_edit_brief
 from agent.runtime.loop import run_agent
 from agent.runtime.model import llm_available
 from agent.strategic_context import build_strategic_context
@@ -32,6 +32,8 @@ def run_llm_director(
     timeline_summary: dict,
     project_path: str,
     emit: EventEmitter | None = None,
+    *,
+    auto_edit: bool = False,
 ) -> DirectorResult | None:
     if not llm_available():
         return None
@@ -57,15 +59,19 @@ def run_llm_director(
         return None
 
     intent = (submit.get("intent") or "edit").lower()
+    if auto_edit:
+        intent = "edit"
     markdown = submit.get("brief_markdown") or ""
 
-    if intent == "answer":
+    if intent == "answer" and not auto_edit:
         brief = build_edit_brief(user_message, timeline_summary, "custom")
         return DirectorResult(
             brief=brief, markdown=markdown, goals=[], answer_only=True,
         )
 
-    preset_hint = submit.get("preset_hint") or detect_preset(user_message)
+    preset_hint = submit.get("preset_hint") or "custom"
+    if preset_hint == "custom" and "blog" in user_message.lower():
+        preset_hint = "blog"
     brief = build_edit_brief(user_message, timeline_summary, preset_hint)
 
     memory = SessionMemory()
@@ -93,8 +99,16 @@ def run_llm_director(
         ))
 
     if not goals:
-        logger.warning("Director intent=edit but no goals submitted")
-        return None
+        if auto_edit:
+            goals = [Goal(
+                id=new_id(),
+                description="Professional full-project auto-edit per Director brief",
+                type=TaskType.VIDEO,
+                priority=5,
+            )]
+        else:
+            logger.warning("Director intent=edit but no goals submitted")
+            return None
 
     goals.sort(key=lambda g: -g.priority)
     return DirectorResult(

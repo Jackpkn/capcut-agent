@@ -11,7 +11,7 @@ from agent.runtime.model import llm_available
 from agent.runtime.tools import propose_tool_for_action
 from agent.streaming import EventEmitter
 from core.models import Task
-from core.slices import get_slice_for_task_type
+from core.retrieve_context import retrieve_context
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,11 @@ def run_llm_specialist(
         return None
 
     domain = task.type.value
-    slice_data = get_slice_for_task_type(project_path, domain)
-    task.context_summary = _summarize_slice(domain, slice_data)
+    retrieved = retrieve_context(project_path, task.instruction, domain=domain)
+    task.context_summary = {
+        "domains": retrieved.domains,
+        "notes": retrieved.retrieval_notes,
+    }
 
     propose_tool = propose_tool_for_action(task.action)
     tool_hint = f"Primary tool: {propose_tool}" if propose_tool else ""
@@ -39,7 +42,7 @@ def run_llm_specialist(
         f"{tool_hint}\n"
         "Verify against the slice, refine if needed, then confirm_task."
     )
-    context = f"DOMAIN SLICE ({domain}):\n{json.dumps(slice_data, indent=2)}"
+    context = retrieved.to_prompt_block()
 
     result = run_agent(
         specialist_config(domain),
@@ -70,22 +73,3 @@ def run_llm_specialist(
         return task
 
     return None
-
-
-def _summarize_slice(domain: str, data: dict) -> dict:
-    if domain == "video":
-        return {"clips": len(data.get("clips", [])), "domain": "video"}
-    if domain == "audio":
-        return {"tracks": len(data.get("tracks", [])), "domain": "audio"}
-    if domain == "text":
-        return {
-            "overlays": len(data.get("overlays", [])),
-            "caption_clips": len(data.get("caption_clips", [])),
-            "domain": "text",
-        }
-    if domain == "effects":
-        return {
-            "transitions": data.get("transition_count", 0),
-            "domain": "effects",
-        }
-    return {"domain": domain}
