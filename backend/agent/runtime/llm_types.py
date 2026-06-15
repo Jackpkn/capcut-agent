@@ -13,6 +13,7 @@ class ModelResponse:
 
     output: list = field(default_factory=list)
     output_text: str = ""
+    thinking_text: str = ""
     provider: str = ""
 
 

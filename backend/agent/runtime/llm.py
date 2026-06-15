@@ -1,4 +1,4 @@
-"""Multi-provider LLM: Groq + Gemini with auto-fallback on rate/token limits."""
+"""Multi-provider LLM: Ollama (local) + Groq + Gemini with auto-fallback."""
 
 from __future__ import annotations
 
@@ -9,6 +9,13 @@ from dotenv import load_dotenv
 from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 
 from agent.runtime.llm_types import ModelResponse, make_function_call, make_message, new_call_id
+from agent.runtime.ollama_provider import (
+    call_ollama,
+    list_ollama_models,
+    ollama_available,
+    resolve_ollama_model,
+    stream_ollama_text,
+)
 
 load_dotenv()
 
@@ -30,28 +37,41 @@ def gemini_available() -> bool:
 
 
 def llm_available() -> bool:
-    return groq_available() or gemini_available()
+    return ollama_available() or groq_available() or gemini_available()
+
+
+def _provider_ready(name: str) -> bool:
+    if name == "ollama":
+        return ollama_available()
+    if name == "groq":
+        return groq_available()
+    if name == "gemini":
+        return gemini_available()
+    return False
 
 
 def provider_order(explicit: str | None = None) -> list[str]:
-    """Resolve provider try-order: auto (primary + fallback), groq-only, or gemini-only."""
+    """Resolve provider try-order: ollama | groq | gemini | auto."""
     mode = (explicit or os.environ.get("LLM_PROVIDER", "auto")).lower()
-    has_groq = groq_available()
-    has_gemini = gemini_available()
 
+    if mode == "ollama":
+        return ["ollama"] if ollama_available() else []
     if mode == "groq":
-        return ["groq"] if has_groq else []
+        return ["groq"] if groq_available() else []
     if mode == "gemini":
-        return ["gemini"] if has_gemini else []
+        return ["gemini"] if gemini_available() else []
 
-    primary = os.environ.get("LLM_PRIMARY", "groq").lower()
-    secondary = "gemini" if primary == "groq" else "groq"
+    primary = os.environ.get("LLM_PRIMARY", "ollama").lower()
+    fallbacks = ("ollama", "groq", "gemini")
     order: list[str] = []
-    for name in (primary, secondary):
-        if name == "groq" and has_groq and "groq" not in order:
-            order.append("groq")
-        if name == "gemini" and has_gemini and "gemini" not in order:
-            order.append("gemini")
+
+    if _provider_ready(primary):
+        order.append(primary)
+
+    for name in fallbacks:
+        if name != primary and _provider_ready(name) and name not in order:
+            order.append(name)
+
     return order
 
 
@@ -115,7 +135,9 @@ def _call_groq(
     tools: list | None,
     temperature: float,
     max_output_tokens: int,
+    agent: str = "",
 ) -> ModelResponse | None:
+    from agent.runtime.agent_log import llm_timer
     from agent.runtime.groq_retry import call_with_groq_retry
 
     client = _get_groq_client()
@@ -133,7 +155,8 @@ def _call_groq(
         )
 
     try:
-        response = call_with_groq_retry(_create, max_attempts=2, label="Groq")
+        with llm_timer("groq", GROQ_MODEL, agent=agent, tools=len(tools or [])):
+            response = call_with_groq_retry(_create, max_attempts=2, label="Groq")
     except APIConnectionError as exc:
         logger.warning("Groq connection error: %s", exc)
         return None
@@ -247,7 +270,10 @@ def _call_gemini(
     tools: list | None,
     temperature: float,
     max_output_tokens: int,
+    agent: str = "",
 ) -> ModelResponse | None:
+    from agent.runtime.agent_log import llm_timer
+
     client = _get_gemini_client()
     if client is None:
         return None
@@ -267,11 +293,12 @@ def _call_gemini(
         config.tools = gemini_tools
 
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=config,
-        )
+        with llm_timer("gemini", GEMINI_MODEL, agent=agent, tools=len(tools or [])):
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=config,
+            )
     except Exception as exc:
         if _is_limit_error(exc):
             from agent.runtime.groq_rate_state import mark_rate_limited
@@ -355,23 +382,49 @@ def call_model(
     temperature: float = 0.4,
     max_output_tokens: int = 1536,
     provider: str | None = None,
+    agent: str = "",
+    emit=None,
 ) -> ModelResponse | None:
     """Call LLM; on rate/token limits try the next configured provider."""
+    from agent.runtime.agent_log import agent as log_agent, llm as log_llm
+    from agent.runtime.stream_emit import make_chunk_emitter
+
+    on_chunk, finalize = make_chunk_emitter(emit, agent=agent or "")
+
     order = provider_order(provider)
     if not order:
-        logger.warning("No LLM provider configured (set GROQ_API_KEY and/or GEMINI_API_KEY)")
+        log_llm("no provider configured — start Ollama or set API keys")
         return None
+
+    log_llm(
+        "routing",
+        order=",".join(order),
+        agent=agent or None,
+        tools=len(tools or []),
+        max_tokens=max_output_tokens,
+    )
 
     last_exc: BaseException | None = None
     for name in order:
         try:
-            if name == "groq":
+            if name == "ollama":
+                result = call_ollama(
+                    instructions=instructions,
+                    input_items=input_items,
+                    tools=tools,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    agent=agent,
+                    on_chunk=on_chunk,
+                )
+            elif name == "groq":
                 result = _call_groq(
                     instructions=instructions,
                     input_items=input_items,
                     tools=tools,
                     temperature=temperature,
                     max_output_tokens=max_output_tokens,
+                    agent=agent,
                 )
             else:
                 result = _call_gemini(
@@ -380,11 +433,21 @@ def call_model(
                     tools=tools,
                     temperature=temperature,
                     max_output_tokens=max_output_tokens,
+                    agent=agent,
                 )
             if result is not None:
+                finalize(thinking_fallback=result.thinking_text or "")
                 result.provider = name
+                n_calls = sum(1 for o in result.output if getattr(o, "type", None) == "function_call")
+                log_llm(
+                    "response",
+                    provider=name,
+                    agent=agent or None,
+                    tool_calls=n_calls,
+                    chars=len(result.output_text or ""),
+                )
                 if len(order) > 1 and name != order[0]:
-                    logger.info("LLM fallback: using %s (primary %s unavailable)", name, order[0])
+                    log_llm("fallback used", from_provider=order[0], to_provider=name)
                 return result
         except Exception as exc:
             last_exc = exc
@@ -406,30 +469,47 @@ def stream_model_text(
     tools: list | None = None,
     temperature: float = 0.5,
     max_output_tokens: int = 1024,
+    think: bool | None = None,
 ):
-    """Yield text deltas; falls back Groq → Gemini on stream errors."""
+    """Yield (channel, text) — channel is 'thinking' or 'text'."""
     order = provider_order()
     for name in order:
         try:
-            if name == "groq":
-                gen = _stream_groq(
+            if name == "ollama":
+                gen = stream_ollama_text(
                     instructions=instructions,
                     input_items=input_items,
-                    tools=tools,
                     temperature=temperature,
                     max_output_tokens=max_output_tokens,
+                    think=think,
+                )
+            elif name == "groq":
+                gen = (
+                    ("text", delta)
+                    for delta in _stream_groq(
+                        instructions=instructions,
+                        input_items=input_items,
+                        tools=tools,
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                    )
                 )
             else:
-                gen = _stream_gemini(
-                    instructions=instructions,
-                    input_items=input_items,
-                    temperature=temperature,
-                    max_output_tokens=max_output_tokens,
+                gen = (
+                    ("text", delta)
+                    for delta in _stream_gemini(
+                        instructions=instructions,
+                        input_items=input_items,
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                    )
                 )
             yielded = False
-            for delta in gen:
+            for channel, delta in gen:
+                if not delta:
+                    continue
                 yielded = True
-                yield delta
+                yield channel, delta
             if yielded:
                 return
         except Exception as exc:
@@ -437,4 +517,4 @@ def stream_model_text(
                 logger.warning("%s stream limit — trying next provider", name)
                 continue
             logger.warning("%s stream failed: %s", name, exc)
-            return
+            continue
