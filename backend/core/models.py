@@ -57,6 +57,7 @@ ACTION_DOMAIN: dict[str, TaskType] = {
     "remove_effect": TaskType.EFFECTS,
     "add_sticker": TaskType.EFFECTS,
     "update_transition": TaskType.EFFECTS,
+    "draft_operations": TaskType.VIDEO,
 }
 
 SPECIALIST_FOR_TYPE: dict[TaskType, str] = {
@@ -136,6 +137,7 @@ class EditSession:
     id: str
     project_path: str
     human_message: str
+    auto_edit: bool = False
     status: SessionStatus = SessionStatus.PLANNING
     goals: list[Goal] = field(default_factory=list)
     tasks: list[Task] = field(default_factory=list)
@@ -156,6 +158,7 @@ class EditSession:
             "id": self.id,
             "project_path": self.project_path,
             "human_message": self.human_message,
+            "auto_edit": self.auto_edit,
             "status": self.status.value,
             "goals": [g.to_dict() for g in self.goals],
             "tasks": [t.to_dict() for t in self.tasks],
