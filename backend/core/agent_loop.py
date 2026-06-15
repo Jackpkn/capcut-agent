@@ -44,6 +44,17 @@ def _answer_via_single_agent(session: EditSession, emit: EventEmitter | None) ->
 
 def plan_session(session: EditSession, emit: EventEmitter | None = None) -> EditSession:
     """Director (LLM) decides answer vs edit → Planner queues tasks."""
+    from agent.runtime.agent_log import agent as log_agent
+    from core.project_ledger import hydrate_session_memory
+
+    log_agent("plan_session", session_id=session.id, auto_edit=session.auto_edit)
+
+    session.session_memory = hydrate_session_memory(
+        session.project_path,
+        session.session_memory,
+    )
+    update_session(session)
+
     session.status = SessionStatus.PLANNING
     session.timeline_summary = get_timeline_summary(session.project_path)
 
@@ -64,11 +75,13 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
         session.timeline_summary,
         session.project_path,
         emit=emit,
+        auto_edit=session.auto_edit,
     )
     if director is None:
         return _answer_via_single_agent(session, emit)
 
     if director.answer_only:
+        log_agent("director answer_only — falling back to chat agent", session_id=session.id)
         # Director has no present_timeline / segment data — use chat agent for Q&A visuals.
         return _answer_via_single_agent(session, emit)
 
@@ -77,8 +90,20 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
     brief = director.brief
     session.goals = director.goals
     session.chapters = director.chapters
-    session.session_memory = director.memory.to_dict()
-    memory = director.memory
+    log_agent(
+        "director edit plan",
+        session_id=session.id,
+        chapters=len(session.chapters),
+        goals=len(session.goals),
+    )
+    from core.project_ledger import hydrate_session_memory
+    from core.session_memory import SessionMemory
+
+    session.session_memory = hydrate_session_memory(
+        session.project_path,
+        director.memory.to_dict(),
+    )
+    memory = SessionMemory.from_dict(session.session_memory)
 
     if emit:
         emit({
@@ -92,6 +117,11 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
 
     for chapter in session.chapters:
         chapter.status = "planning"
+        log_agent(
+            "scene_planner",
+            chapter=chapter.label,
+            index=f"{chapter.index}/{len(session.chapters)}",
+        )
         if emit:
             emit({
                 "type": "chapter_started",
@@ -149,6 +179,12 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
         return session
     session.status = SessionStatus.QUEUED
     update_session(session)
+    log_agent(
+        "plan_session done",
+        session_id=session.id,
+        tasks=len(all_tasks),
+        chapters=len(session.chapters),
+    )
     return session
 
 
@@ -173,19 +209,24 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
             "label": "Director Agent — understanding goal…",
         })
 
-        plan_events: list[dict] = []
+        import queue
+        import threading
 
-        from agent.streaming import should_surface_trace_event
+        plan_q: queue.Queue = queue.Queue()
+        plan_box: dict = {}
 
-        def plan_emit(event: dict) -> None:
-            if should_surface_trace_event(event):
-                plan_events.append(event)
+        def plan_worker() -> None:
+            plan_box["session"] = plan_session(session, emit=lambda ev: plan_q.put(ev))
+            plan_q.put(None)
 
         if not session.tasks:
-            session = plan_session(session, emit=plan_emit)
-
-        for ev in plan_events:
-            yield sse_line(ev)
+            threading.Thread(target=plan_worker, daemon=True).start()
+            while True:
+                ev = plan_q.get()
+                if ev is None:
+                    break
+                yield sse_line(ev)
+            session = plan_box["session"]
 
         if session.status == SessionStatus.DONE and not session.tasks:
             from agent.streaming import emit_text_chunks
@@ -194,11 +235,16 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
             emit_text_chunks(stream_events.append, session.brief_markdown)
             for ev in stream_events:
                 yield sse_line(ev)
+            done_label = (
+                "Planning incomplete — no tasks queued"
+                if session.goals
+                else "Answer ready"
+            )
             yield sse_line({
                 "type": "step",
                 "id": "director",
                 "status": "done",
-                "label": "Answer ready",
+                "label": done_label,
             })
             yield sse_line({
                 "type": "done",
@@ -245,10 +291,15 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
         session.status = SessionStatus.RUNNING
         update_session(session)
 
+        from agent.runtime.stream_emit import is_live_sse_event
         from agent.streaming import should_surface_trace_event
 
         approved_tasks = []
         specialist_events: list[dict] = []
+
+        def _yield_specialist_event(ev: dict) -> Iterator[str]:
+            if is_live_sse_event(ev) or should_surface_trace_event(ev):
+                yield sse_line(ev)
 
         def specialist_emit(event: dict) -> None:
             specialist_events.append(event)
@@ -274,6 +325,12 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
                 continue
 
             task.status = TaskStatus.RUNNING
+            from agent.runtime.agent_log import agent as log_agent
+            log_agent(
+                "specialist",
+                task=f"{task.specialist}: {task.description[:50]}",
+                index=f"{i}/{total_tasks}",
+            )
             anchor = describe_timeline_target(
                 task.action, task.params or {}, session.timeline_summary,
             )
@@ -287,9 +344,7 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
                 total=total_tasks,
             )
             while specialist_events:
-                ev = specialist_events.pop(0)
-                if should_surface_trace_event(ev):
-                    yield sse_line(ev)
+                yield from _yield_specialist_event(specialist_events.pop(0))
 
             yield sse_line({
                 "type": "task_started",
@@ -300,9 +355,7 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
             })
             task = execute_specialist(task, session.project_path, emit=specialist_emit)
             while specialist_events:
-                ev = specialist_events.pop(0)
-                if should_surface_trace_event(ev):
-                    yield sse_line(ev)
+                yield from _yield_specialist_event(specialist_events.pop(0))
 
             yield sse_line({
                 "type": "step",
@@ -366,9 +419,15 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
                 "action": t.action,
                 "params": t.params,
                 "description": t.description,
+                "chapter_id": t.chapter_id,
             }
             for t in approved_tasks
         ]
+
+        if actions:
+            from core.project_ledger import record_proposed_edits
+
+            record_proposed_edits(session.project_path, actions)
 
         rejected = [t for t in session.tasks if t.status == TaskStatus.REJECTED]
         team_plan = {
@@ -424,12 +483,22 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
 def _format_team_reply(session: EditSession, tasks: list) -> str:
     """Short fallback text; UI renders structured team_plan payload."""
     rejected = sum(1 for t in session.tasks if t.status == TaskStatus.REJECTED)
-    label = session.brief_data.get("preset_label", "Edit plan")
+    if session.auto_edit:
+        label = "Auto edit"
+    else:
+        label = session.brief_data.get("preset_label", "Edit plan")
     return (
         f"**{label}** — {len(tasks)} change(s) ready to apply"
         + (f", {rejected} skipped by QA" if rejected else "")
         + ". Review below and approve."
     )
+
+
+def _record_applied_actions(session: EditSession, actions: list[dict]) -> None:
+    """Persist applied edits to project ledger and sync session memory."""
+    from core.project_ledger import record_applied_for_session
+
+    record_applied_for_session(session, actions)
 
 
 def _approved_tasks_for_apply(session: EditSession) -> list:
@@ -470,6 +539,9 @@ def apply_session_tasks(session_id: str) -> tuple[list[str], str]:
     for t in tasks:
         t.status = TaskStatus.DONE
 
+    _record_applied_actions(session, actions)
+    from agent.runtime.agent_log import agent as log_agent
+    log_agent("apply done", session_id=session.id, actions=len(actions))
     session.status = SessionStatus.DONE
     update_session(session)
     return results, suffix
@@ -556,8 +628,13 @@ def iter_apply_actions_sse(
         })
 
         if session:
+            _record_applied_actions(session, actions)
             session.status = SessionStatus.DONE
             update_session(session)
+        else:
+            from core.project_ledger import record_applied_edits
+
+            record_applied_edits(project_path, actions)
 
         reply = format_execute_reply(results)
         if reopened:
