@@ -130,6 +130,9 @@ def describe_action(action: str, params: dict) -> str:
         return f'Generate AI video at {params.get("start_sec", 0)}s: "{params.get("prompt", "")[:48]}"'
     if action == "generate_captions":
         return f'Generate speech-synced captions ({params.get("style", "travel")} style, Whisper)'
+    if action == "draft_operations":
+        from capcut.draft_ops import describe_operations
+        return describe_operations(params.get("operations", []))
     return f"{action}: {json.dumps(params)}"
 
 
@@ -410,6 +413,12 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
             "Set VIDEO_GEN_API_KEY on the server — then approve again."
         )
 
+    if action == "draft_operations":
+        from capcut.draft_ops import apply_draft_operations
+
+        results = apply_draft_operations(project_path, params.get("operations", []))
+        return "; ".join(results) if results else "No operations applied"
+
     raise ValueError(f"Unknown action: {action}")
 
 
@@ -483,6 +492,9 @@ def iter_execute_sse(actions: list[dict], project_path: str):
 
     results = result_box["results"]
     from agent.brain import format_execute_reply
+    from core.project_ledger import record_applied_edits
+
+    record_applied_edits(project_path, actions)
 
     yield sse_line({
         "type": "done",
