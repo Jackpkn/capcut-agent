@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RichAgentContent } from "./RichAgentContent";
 import { EditorTimelineReport, type EditorTimelinePayload } from "./EditorTimelineReport";
 
@@ -10,6 +10,66 @@ export type AgentStep = {
   status: "running" | "done" | "error";
   detail?: string;
 };
+
+function ThinkingPanel({
+  thinking,
+  streaming,
+  agent,
+}: {
+  thinking?: string;
+  streaming?: boolean;
+  agent?: string;
+}) {
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    if (streaming || thinking) setOpen(true);
+  }, [streaming, thinking]);
+
+  if (!thinking && !streaming) return null;
+
+  return (
+    <div className="mb-3 rounded-xl border-2 border-violet-400/60 bg-violet-500/15 overflow-hidden shadow-[0_0_32px_rgba(139,92,246,0.18)]">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-violet-500/[0.05] transition-colors cursor-pointer"
+      >
+        <span
+          className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+            streaming
+              ? "bg-violet-400 animate-pulse shadow-[0_0_8px_rgba(167,139,250,0.45)]"
+              : "bg-violet-400/80"
+          }`}
+        />
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] uppercase tracking-wider font-semibold text-violet-200/80">
+            {streaming ? "Model thinking…" : "Model thinking"}
+            {agent ? ` — ${agent}` : ""}
+          </p>
+          <p className="text-[11px] text-violet-200/40 truncate">
+            {thinking ? `${thinking.length} chars` : "Waiting for reasoning trace…"}
+          </p>
+        </div>
+        <span className="text-violet-200/35 text-xs shrink-0">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-violet-500/20 px-3.5 py-3 max-h-72 overflow-y-auto">
+          {thinking ? (
+            <pre className="text-[11px] leading-relaxed text-violet-100/75 whitespace-pre-wrap font-sans">
+              {thinking}
+              {streaming && (
+                <span className="inline-block w-0.5 h-3.5 ml-0.5 bg-violet-300 animate-pulse align-middle rounded-full" />
+              )}
+            </pre>
+          ) : (
+            <p className="text-[11px] text-violet-200/45 animate-pulse">Reasoning…</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TracePanel({ steps, streaming }: { steps: AgentStep[]; streaming?: boolean }) {
   const [open, setOpen] = useState(streaming ?? false);
@@ -106,6 +166,9 @@ function StepIcon({ status }: { status: AgentStep["status"] }) {
 
 export function AssistantMessage({
   content,
+  thinking,
+  thinkingStreaming,
+  agent: thinkingAgent,
   steps = [],
   proposals = [],
   editorReport,
@@ -113,6 +176,9 @@ export function AssistantMessage({
   waiting,
 }: {
   content?: string;
+  thinking?: string;
+  thinkingStreaming?: boolean;
+  agent?: string;
   steps?: AgentStep[];
   proposals?: string[];
   editorReport?: EditorTimelinePayload | null;
@@ -122,6 +188,12 @@ export function AssistantMessage({
   return (
     <div className="space-y-3 w-full">
       {editorReport && <EditorTimelineReport report={editorReport} />}
+
+      <ThinkingPanel
+        thinking={thinking}
+        streaming={thinkingStreaming || (streaming && !content)}
+        agent={thinkingAgent}
+      />
 
       <TracePanel steps={steps} streaming={streaming} />
 
