@@ -10,6 +10,10 @@ import { TaskQueuePanel, type TeamGoal, type TeamTask } from "./components/TaskQ
 
 const API = "http://localhost:8000";
 
+function sseContent(event: Record<string, unknown>): string {
+  return String(event.content ?? event.delta ?? "");
+}
+
 async function consumeSSE(
   response: Response,
   onEvent: (event: Record<string, unknown>) => void
@@ -52,6 +56,9 @@ type AgentStep = {
 type Message = {
   role: string;
   content: string;
+  thinking?: string;
+  thinkingStreaming?: boolean;
+  thinkingAgent?: string;
   steps?: AgentStep[];
   proposals?: string[];
   editorReport?: EditorTimelinePayload | null;
@@ -98,6 +105,15 @@ type AnalysisResult = {
   suggested_actions: PendingAction[];
   waveform_peaks?: number[];
   audio_markers?: number[];
+  clip_intelligence?: {
+    index?: number;
+    name?: string;
+    content?: string;
+    emotion?: string;
+    suggested_use?: string;
+    hook_strength?: number;
+    quality_score?: number;
+  }[];
 };
 
 type ProjectSummary = {
@@ -157,6 +173,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [autoEditing, setAutoEditing] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedPath, setSelectedPath] = useState("");
@@ -185,6 +202,7 @@ export default function Home() {
   const [librarySyncing, setLibrarySyncing] = useState(false);
   const [teamMode, setTeamMode] = useState(false);
   const [teamSessionId, setTeamSessionId] = useState<string | null>(null);
+  const [teamAutoEdit, setTeamAutoEdit] = useState(false);
   const [teamTasks, setTeamTasks] = useState<TeamTask[]>([]);
   const [teamGoals, setTeamGoals] = useState<TeamGoal[]>([]);
   const [teamChapters, setTeamChapters] = useState<
@@ -328,7 +346,7 @@ export default function Home() {
     setClipPreviews([]);
     setWaveformPeaks([]);
     setAudioMarkers([]);
-    log("Analyzing project locally (video → audio → fixes)…", "info");
+    log("Analyzing project (video → audio → understand clips → fixes)…", "info");
 
     try {
       const res = await fetch(
@@ -365,16 +383,43 @@ export default function Home() {
               issues: (event.issues as string[]) ?? [],
             },
           ]);
+        } else if (type === "clip_understanding") {
+          const clip = event.clip as {
+            index?: number;
+            name?: string;
+            content?: string;
+            emotion?: string;
+            suggested_use?: string;
+            hook_strength?: number;
+          };
+          if (clip?.index != null) {
+            setClipPreviews((prev) => {
+              const existing = prev.find((p) => p.index === clip.index);
+              const summary = [clip.content, clip.emotion, clip.suggested_use]
+                .filter(Boolean)
+                .join(" · ");
+              const issues = summary ? [summary] : [];
+              if (existing) {
+                return prev.map((p) =>
+                  p.index === clip.index ? { ...p, issues: [...p.issues, ...issues] } : p
+                );
+              }
+              return [
+                ...prev,
+                { index: clip.index!, name: clip.name ?? `Clip ${clip.index}`, thumbnail: null, issues },
+              ];
+            });
+          }
         } else if (type === "waveform") {
           setWaveformPeaks((event.peaks as number[]) ?? []);
           setAudioMarkers((event.markers as number[]) ?? []);
         } else if (type === "done") {
           const result = event.result as AnalysisResult;
           setAnalysis(result);
-          log(`Analysis complete — score ${result.score}/100, ${result.total_issues} issue(s)`, "success");
+          log(`Analysis complete — score ${result.score}/100, ${result.clip_intelligence?.length ?? 0} clip(s) understood`, "success");
           setMessages((prev) => [...prev, {
             role: "assistant",
-            content: `**Project analysis complete** (score ${result.score}/100)\n\n${result.suggested_actions.length} auto-fix(es) ready in the Analysis panel. Say **apply analysis fixes** or click Apply all.`,
+            content: `**Project analysis complete** (score ${result.score}/100)\n\n${result.clip_intelligence?.length ? `${result.clip_intelligence.length} clip(s) understood for smarter edits. ` : ""}${result.suggested_actions.length} auto-fix(es) ready in the Analysis panel. Say **apply analysis fixes** or click Apply all.`,
           }]);
         }
       });
@@ -443,11 +488,49 @@ export default function Home() {
     let steps: AgentStep[] = [];
     let proposals: string[] = [];
     let reply = "";
+    let thinking = "";
     let tasks: TeamTask[] = initialTasks;
 
     await consumeSSE(res, (event) => {
       const type = event.type as string;
-      if (type === "editor_timeline") {
+      if (type === "model_thinking_start") {
+        const agent = event.agent ? String(event.agent) : "model";
+        steps = upsertStep(steps, {
+          id: "model_thinking",
+          label: `Model reasoning — ${agent}`,
+          status: "running",
+          detail: "Streaming…",
+        });
+        flushSync(() =>
+          patchStreamingAssistant({
+            thinking: thinking || "",
+            thinkingStreaming: true,
+            thinkingAgent: agent,
+            steps: [...steps],
+          })
+        );
+      } else if (type === "model_thinking") {
+        thinking += sseContent(event);
+        steps = upsertStep(steps, {
+          id: "model_thinking",
+          label: "Model reasoning",
+          status: "running",
+          detail: thinking.length > 600 ? `…${thinking.slice(-600)}` : thinking,
+        });
+        flushSync(() =>
+          patchStreamingAssistant({ thinking, thinkingStreaming: true, steps: [...steps] })
+        );
+      } else if (type === "model_thinking_end") {
+        steps = upsertStep(steps, {
+          id: "model_thinking",
+          label: "Model reasoning",
+          status: "done",
+          detail: thinking || "Complete",
+        });
+        flushSync(() =>
+          patchStreamingAssistant({ thinking: thinking || undefined, thinkingStreaming: false, steps: [...steps] })
+        );
+      } else if (type === "editor_timeline") {
         patchStreamingAssistant({
           editorReport: event.report as EditorTimelinePayload,
           streaming: true,
@@ -553,10 +636,10 @@ export default function Home() {
       } else if (type === "response_start") {
         patchStreamingAssistant({ content: "", streaming: true });
       } else if (type === "text_delta") {
-        reply += String(event.content ?? "");
+        reply += sseContent(event);
         flushSync(() => patchStreamingAssistant({ content: reply, streaming: true }));
       } else if (type === "agent_message") {
-        reply += String(event.content ?? "");
+        reply += sseContent(event);
         flushSync(() => patchStreamingAssistant({ content: reply, streaming: true }));
       } else if (type === "error") {
         throw new Error(String(event.message ?? "Team error"));
@@ -572,15 +655,21 @@ export default function Home() {
         else if (actions.length) void fetchEditPreview(actions);
         patchStreamingAssistant({
           content: reply,
+          thinking: String(event.thinking ?? thinking ?? "") || undefined,
           teamPlan,
           steps,
           proposals: teamPlan ? [] : proposals,
           streaming: false,
+          thinkingStreaming: false,
           pendingActions: actions,
         });
         pushAgentLive({
           active: false,
-          title: isAnswer ? "Answer ready" : "Team plan ready — review & approve",
+          title: isAnswer
+            ? "Answer ready"
+            : tasks.length === 0
+              ? "Team finished — no edits queued"
+              : "Team plan ready — review & approve",
         });
         if (actions.length) log(`Team ready — ${actions.length} task(s) awaiting approval`, "success");
       }
@@ -668,6 +757,7 @@ export default function Home() {
     }
 
     setTeamSessionId(null);
+    setTeamAutoEdit(false);
     setTeamTasks([]);
     setTeamGoals([]);
     setTeamPaused(false);
@@ -710,6 +800,7 @@ export default function Home() {
       steps: AgentStep[];
       proposals: string[];
       reply: string;
+      thinking: string;
       tasks: TeamTask[];
       patchAssistant: (patch: Partial<Message>) => void;
     }
@@ -717,11 +808,74 @@ export default function Home() {
     const type = event.type as string;
     let { steps, proposals, reply, tasks } = ctx;
 
-    if (type === "editor_timeline") {
+    if (type === "model_thinking_start") {
+      const agent = event.agent ? String(event.agent) : "model";
+      // New agent turn — reset reasoning buffer (don't wipe on every chunk).
+      if (!ctx.thinkingStreaming) {
+        ctx.thinking = "";
+      }
+      steps = upsertStep(steps, {
+        id: "model_thinking",
+        label: `Model reasoning — ${agent}`,
+        status: "running",
+        detail: "Streaming…",
+      });
+      flushSync(() =>
+        ctx.patchAssistant({
+          thinking: ctx.thinking,
+          thinkingStreaming: true,
+          thinkingAgent: agent,
+          steps: [...steps],
+        })
+      );
+    } else if (type === "model_thinking") {
+      ctx.thinking += sseContent(event);
+      steps = upsertStep(steps, {
+        id: "model_thinking",
+        label: steps.find((s) => s.id === "model_thinking")?.label ?? "Model reasoning",
+        status: "running",
+        detail: ctx.thinking.length > 600 ? `…${ctx.thinking.slice(-600)}` : ctx.thinking,
+      });
+      flushSync(() =>
+        ctx.patchAssistant({
+          thinking: ctx.thinking,
+          thinkingStreaming: true,
+          steps: [...steps],
+        })
+      );
+    } else if (type === "model_thinking_end") {
+      steps = upsertStep(steps, {
+        id: "model_thinking",
+        label: steps.find((s) => s.id === "model_thinking")?.label ?? "Model reasoning",
+        status: "done",
+        detail: ctx.thinking
+          ? ctx.thinking.length > 800
+            ? `…${ctx.thinking.slice(-800)}`
+            : ctx.thinking
+          : "Complete",
+      });
+      flushSync(() =>
+        ctx.patchAssistant({
+          thinking: ctx.thinking || undefined,
+          thinkingStreaming: false,
+          steps: [...steps],
+        })
+      );
+    } else if (type === "editor_timeline") {
       ctx.patchAssistant({
         editorReport: event.report as EditorTimelinePayload,
         streaming: true,
       });
+    } else if (type === "auto_edit_start") {
+      const label = String(event.label ?? "Auto edit");
+      pushAgentLive({ title: label, routeMode: "auto_edit" });
+      steps = upsertStep(steps, {
+        id: "auto_edit",
+        label,
+        status: "running",
+        detail: event.hint ? String(event.hint) : "Pro full-timeline edit — all chapters",
+      });
+      ctx.patchAssistant({ steps: [...steps], streaming: true });
     } else if (type === "route_decision") {
       pushAgentLive({
         routeMode: String(event.mode ?? ""),
@@ -736,8 +890,22 @@ export default function Home() {
       });
       ctx.patchAssistant({ steps: [...steps] });
     } else if (type === "workflow" && event.workflow === "team" && event.session_id) {
+      const isAuto = Boolean(event.auto_edit);
       setTeamSessionId(String(event.session_id));
-      pushAgentLive({ title: "Sequential team — specialists run one-by-one" });
+      setTeamAutoEdit(isAuto);
+      pushAgentLive({
+        title: isAuto
+          ? "Auto edit — Director → all chapters → one approve"
+          : "Sequential team — specialists run one-by-one",
+      });
+      if (isAuto) {
+        steps = upsertStep(steps, {
+          id: "auto_edit",
+          label: "Auto edit pipeline",
+          status: "running",
+        });
+        ctx.patchAssistant({ steps: [...steps], streaming: true });
+      }
     } else if (type === "chapter_map") {
       const chs = (event.chapters as typeof teamChapters) ?? [];
       setTeamChapters(chs);
@@ -786,6 +954,15 @@ export default function Home() {
           .join(" "),
       });
       pushAgentLive({ steps: [...steps] });
+      ctx.patchAssistant({ steps: [...steps], streaming: true });
+    } else if (type === "phase" && event.id === "understand") {
+      steps = upsertStep(steps, {
+        id: "understand",
+        label: String(event.label ?? "Understanding clips"),
+        status: (event.status as AgentStep["status"]) ?? "running",
+        detail: event.detail ? String(event.detail) : undefined,
+      });
+      pushAgentLive({ steps: [...steps], title: String(event.label ?? "Understanding clips…") });
       ctx.patchAssistant({ steps: [...steps], streaming: true });
     } else if (type === "team_start") {
       pushAgentLive({ title: "Sequential team session" });
@@ -853,12 +1030,14 @@ export default function Home() {
       reply = "";
       ctx.patchAssistant({ content: "", streaming: true });
     } else if (type === "text_delta" || type === "agent_message") {
-      reply += String(event.content ?? "");
+      reply += sseContent(event);
       flushSync(() => ctx.patchAssistant({ content: reply, streaming: true }));
     } else if (type === "error") {
       throw new Error(String(event.message ?? "Agent error"));
     } else if (type === "done") {
       reply = String(event.reply ?? reply);
+      const finalThinking = String(event.thinking ?? ctx.thinking ?? "").trim();
+      if (finalThinking) ctx.thinking = finalThinking;
       const actions = (event.pending_actions as PendingAction[]) ?? (event.actions as PendingAction[]) ?? [];
       const diff = (event.edit_diff as EditDiff | undefined) ?? null;
       const teamPlan = (event.team_plan as TeamPlanPayload | undefined) ?? undefined;
@@ -867,16 +1046,24 @@ export default function Home() {
       else if (actions.length) void fetchEditPreview(actions);
         ctx.patchAssistant({
           content: reply,
+          thinking: finalThinking || ctx.thinking || undefined,
           teamPlan,
           steps,
           proposals: teamPlan ? [] : proposals,
           streaming: false,
+          thinkingStreaming: false,
           pendingActions: actions,
         });
         // keep editorReport on message
       pushAgentLive({
         active: false,
-        title: actions.length ? "Review & approve" : "Done",
+        title: teamPlan
+          ? teamPlan.tasks?.length
+            ? "Team plan ready — review & approve"
+            : "Team finished — no edits queued"
+          : actions.length
+            ? "Review & approve"
+            : "Done",
       });
     }
 
@@ -886,38 +1073,51 @@ export default function Home() {
     ctx.tasks = tasks;
   };
 
-  const sendMessage = async (text?: string) => {
-    const msg = (text ?? input).trim();
-    if (!msg || loading) return;
+  const sendMessage = async (
+    text?: string,
+    opts?: { autoEdit?: boolean },
+  ) => {
+    const autoEdit = opts?.autoEdit ?? false;
+    const hint = (text ?? input).trim();
+    const msg = autoEdit
+      ? hint || "Travel vlog — captions, music, transitions"
+      : hint;
+    if (!msg || loading || autoEditing) return;
     if (!selectedPath) {
       setError("Select a CapCut project in the sidebar first — timeline visuals need project data.");
       return;
     }
 
+    const userDisplay = autoEdit
+      ? `**Auto edit**${hint ? ` — ${hint}` : " — pro full timeline"}`
+      : msg;
+
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: msg },
-      { role: "assistant", content: "", steps: [], proposals: [], editorReport: null, streaming: true },
+      { role: "user", content: userDisplay },
+      { role: "assistant", content: "", thinking: "", thinkingStreaming: true, steps: [], proposals: [], editorReport: null, streaming: true },
     ]);
     setInput("");
     setLoading(true);
+    if (autoEdit) setAutoEditing(true);
     setError("");
     setPendingActions([]);
     setTeamSessionId(null);
+    setTeamAutoEdit(false);
     setTeamTasks([]);
     setTeamGoals([]);
     setTeamChapters([]);
     pushAgentLive({
       active: true,
-      title: "Understanding your request…",
+      title: autoEdit ? "Starting auto edit…" : "Understanding your request…",
       steps: [],
       proposals: [],
       criticNotes: [],
       directorBrief: undefined,
-      routeMode: undefined,
+      routeMode: autoEdit ? "auto_edit" : undefined,
       routeReason: undefined,
     });
-    log(`You: ${msg.slice(0, 60)}${msg.length > 60 ? "..." : ""}`);
+    log(autoEdit ? `Auto edit: ${msg.slice(0, 60)}` : `You: ${msg.slice(0, 60)}${msg.length > 60 ? "..." : ""}`);
 
     const patchAssistant = (patch: Partial<Message>) => {
       setMessages((prev) => {
@@ -936,7 +1136,8 @@ export default function Home() {
         body: JSON.stringify({
           message: msg,
           project_path: selectedPath || undefined,
-          force_team: teamMode,
+          force_team: teamMode && !autoEdit,
+          auto_edit: autoEdit,
         }),
       });
       if (!res.ok) {
@@ -948,6 +1149,7 @@ export default function Home() {
         steps: [] as AgentStep[],
         proposals: [] as string[],
         reply: "",
+        thinking: "",
         tasks: [] as TeamTask[],
         patchAssistant,
       };
@@ -961,7 +1163,13 @@ export default function Home() {
       pushAgentLive({ active: false, title: "Agent error" });
     } finally {
       setLoading(false);
+      setAutoEditing(false);
     }
+  };
+
+  const runAutoEdit = () => {
+    if (!selectedPath || loading || autoEditing) return;
+    sendMessage(undefined, { autoEdit: true });
   };
 
   const executeTeamApprove = async () => {
@@ -1173,6 +1381,7 @@ export default function Home() {
     setPendingActions([]);
     setEditDiff(null);
     setTeamSessionId(null);
+    setTeamAutoEdit(false);
     setTeamTasks([]);
     await fetch(`${API}/reject`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     log("Changes rejected", "info");
@@ -1230,9 +1439,26 @@ export default function Home() {
           {selectedPath && (
             <div className="mt-4 space-y-2">
               <button
+                onClick={runAutoEdit}
+                disabled={autoEditing || loading || !selectedPath}
+                className="btn-primary w-full text-xs py-2.5 cursor-pointer bg-gradient-to-r from-[#00cbd6] to-[#0099a8] hover:from-[#00dce8] hover:to-[#00a8b8] border-0"
+              >
+                {autoEditing ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="h-3.5 w-3.5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
+                    Auto editing…
+                  </span>
+                ) : (
+                  "Auto Edit Project"
+                )}
+              </button>
+              <p className="text-[10px] text-white/40 leading-relaxed px-0.5">
+                Director plans all chapters → specialists → one approve. Optional vibe in chat first.
+              </p>
+              <button
                 onClick={runAnalysis}
                 disabled={analyzing}
-                className="btn-primary w-full text-xs py-2.5 cursor-pointer"
+                className="btn-secondary w-full text-xs py-2.5 cursor-pointer"
               >
                 {analyzing ? (
                   <span className="flex items-center justify-center gap-2">
@@ -1332,7 +1558,6 @@ export default function Home() {
             {agentLive.routeReason && (
               <p className="text-[11px] text-white/45 mb-3 leading-relaxed">{agentLive.routeReason}</p>
             )}
-            <AgentStepsPanel steps={agentLive.steps} streaming={agentLive.active} />
             {agentLive.directorBrief && (
               <div className="mt-3 pt-3 border-t border-white/5">
                 <p className="text-[10px] uppercase tracking-wider text-capcut font-semibold mb-1.5">Director brief</p>
@@ -1472,9 +1697,11 @@ export default function Home() {
               >
                 {executing
                   ? "Applying…"
-                  : teamSessionId
-                    ? "Approve team plan in CapCut"
-                    : "Approve & apply"}
+                  : teamSessionId && teamAutoEdit
+                    ? "Approve auto edit in CapCut"
+                    : teamSessionId
+                      ? "Approve team plan in CapCut"
+                      : "Approve & apply"}
               </button>
               <button onClick={rejectActions} className="btn-secondary px-4 py-2 text-xs cursor-pointer">
                 Reject
@@ -1528,6 +1755,9 @@ export default function Home() {
                       <div className="space-y-2">
                         <AssistantMessage
                           steps={msg.steps}
+                          thinking={msg.thinking}
+                          thinkingStreaming={msg.thinkingStreaming}
+                          agent={msg.thinkingAgent}
                           editorReport={msg.editorReport}
                           streaming={msg.streaming}
                         />
@@ -1536,11 +1766,14 @@ export default function Home() {
                     ) : (
                       <AssistantMessage
                         content={msg.content}
+                        thinking={msg.thinking}
+                        thinkingStreaming={msg.thinkingStreaming}
+                        agent={msg.thinkingAgent}
                         steps={msg.steps}
                         proposals={msg.proposals}
                         editorReport={msg.editorReport}
                         streaming={msg.streaming}
-                        waiting={msg.streaming && !msg.content && (msg.steps?.length ?? 0) > 0 && !msg.editorReport}
+                        waiting={msg.streaming && !msg.content && !msg.thinking && (msg.steps?.length ?? 0) > 0 && !msg.editorReport}
                       />
                     )}
                   </div>
