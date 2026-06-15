@@ -39,6 +39,9 @@ from capcut.project_ui import apply_with_ui_handoff, reopen_project
 from capcut.writer import _flush_project
 
 logging.basicConfig(level=logging.INFO)
+from agent.runtime.agent_log import configure_logging
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 from analysis.cache import get_cached, set_cached
@@ -161,6 +164,21 @@ def get_cached_analysis(path: str):
     }
 
 
+@app.get("/project/clip-intelligence")
+def clip_intelligence_endpoint(path: str):
+    """Cached per-clip understanding (System 1 — FFmpeg + optional Gemini vision)."""
+    from analysis.clip_intelligence import director_clip_summaries, load_project_intelligence
+    from analysis.vision_local import vision_available
+
+    clips = load_project_intelligence(path)
+    return {
+        "clips": clips,
+        "director_summaries": director_clip_summaries(clips),
+        "vision_available": vision_available(),
+        "count": len(clips),
+    }
+
+
 @app.get("/library/search")
 def library_search(q: str = "", type: str = "all", limit: int = 20):
     try:
@@ -231,17 +249,31 @@ class AgentStreamRequest(BaseModel):
     message: str
     project_path: str | None = None
     force_team: bool = False
+    auto_edit: bool = False
 
 
 @app.post("/agent/stream")
 def agent_stream_endpoint(req: AgentStreamRequest):
     """Unified SSE: orchestrator → answer | edit agent | sequential team."""
-    if not req.message.strip():
+    if not req.message.strip() and not req.auto_edit:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
+    from agent.runtime.agent_log import agent as log_agent
     from agent.unified_stream import iter_unified_sse
 
+    log_agent(
+        "HTTP POST /agent/stream",
+        auto_edit=req.auto_edit,
+        force_team=req.force_team,
+        message=req.message[:60],
+    )
+
     return StreamingResponse(
-        iter_unified_sse(req.message, req.project_path, force_team=req.force_team),
+        iter_unified_sse(
+            req.message,
+            req.project_path,
+            force_team=req.force_team,
+            auto_edit=req.auto_edit,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -365,10 +397,13 @@ def queue_apply_endpoint(req: ExecuteRequest):
         }
 
     from agent.actions import execute_actions
+    from core.project_ledger import record_applied_edits
+
     results, suffix = apply_with_ui_handoff(
         req.project_path,
         lambda: execute_actions(actions, req.project_path),
     )
+    record_applied_edits(req.project_path, actions)
     sync_capcut(req.project_path)
     reply = format_execute_reply(results) + suffix
     record_assistant_reply(reply)
@@ -511,12 +546,18 @@ def execute_endpoint(req: ExecuteRequest):
         raise HTTPException(status_code=400, detail="No actions to execute")
     try:
         assert_safe_to_write(req.project_path)
-        actions = [{"action": a.action, "params": a.params} for a in req.actions]
+        actions = [
+            {"action": a.action, "params": a.params, "description": a.description}
+            for a in req.actions
+        ]
         from agent.actions import execute_actions
+        from core.project_ledger import record_applied_edits
+
         results, suffix = apply_with_ui_handoff(
             req.project_path,
             lambda: execute_actions(actions, req.project_path),
         )
+        record_applied_edits(req.project_path, actions)
         reply = format_execute_reply(results) + suffix
         record_assistant_reply(reply)
         cdp_result = sync_capcut(req.project_path)
@@ -558,6 +599,31 @@ def status():
         "accessibility_enabled": acc["enabled"],
         "accessibility_host_app": acc["host_app"],
         "whisper": _whisper_status(),
+        "llm": _llm_status(),
+    }
+
+
+def _llm_status() -> dict:
+    from agent.runtime.model import (
+        gemini_available,
+        groq_available,
+        list_ollama_models,
+        ollama_available,
+        provider_order,
+        resolve_ollama_model,
+    )
+
+    order = provider_order()
+    return {
+        "available": bool(order),
+        "provider_order": order,
+        "ollama": {
+            "running": ollama_available(),
+            "model": resolve_ollama_model() if ollama_available() else None,
+            "models_installed": list_ollama_models()[:8],
+        },
+        "groq": groq_available(),
+        "gemini": gemini_available(),
     }
 
 
