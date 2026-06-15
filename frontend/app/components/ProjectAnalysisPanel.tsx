@@ -131,6 +131,7 @@ export function ProjectAnalysisPanel({
 }) {
   const videoPhase = phases.video;
   const audioPhase = phases.audio;
+  const understandPhase = phases.understand;
   const suggestPhase = phases.suggestions;
   const peaks = waveformPeaks.length ? waveformPeaks : analysis?.waveform_peaks ?? [];
   const markers = audioMarkers.length ? audioMarkers : analysis?.audio_markers ?? [];
@@ -299,7 +300,20 @@ export function ProjectAnalysisPanel({
                   </div>
                 </div>
 
-                {/* Step 3 — Suggestions */}
+                {/* Step 3 — Clip understanding */}
+                <div className="flex gap-3">
+                  <StepIcon status={understandPhase?.status ?? (analyzing ? "running" : "done")} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[11px] font-semibold text-white/90 uppercase tracking-wide">
+                      {understandPhase?.label ?? "Clip understanding"}
+                    </p>
+                    <p className="text-[10px] text-white/50 leading-relaxed mt-0.5">
+                      {understandPhase?.detail ?? "What is in each clip — FFmpeg + optional Gemini vision (free tier)"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step 4 — Suggestions */}
                 <div className="flex gap-3">
                   <StepIcon status={suggestPhase?.status ?? (analyzing ? "running" : "done")} />
                   <div className="flex-1 min-w-0">
