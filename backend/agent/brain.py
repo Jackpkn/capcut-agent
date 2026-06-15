@@ -7,6 +7,10 @@ from agent.actions import describe_action, execute_actions
 from agent.streaming import (
     EventEmitter,
     emit_text_chunks,
+    emit_thinking_chunks,
+    model_thinking_delta,
+    model_thinking_end,
+    model_thinking_start,
     proposal as emit_proposal,
     response_start,
     step as emit_step,
@@ -46,6 +50,7 @@ You think like a professional editor — fast, creative, and precise. The human 
 - Use propose_batch_update_texts for bulk caption changes.
 - Use search_library / get_director_picks when you need catalog assets before proposing add_* actions.
 - For AI-generated B-roll: propose_generate_image or propose_generate_video_clip with start_sec on the timeline.
+- For multiple timeline changes (split, delete, mixed edits): use **propose_draft_operations** with an `operations` array instead of many separate propose_* calls.
 - When ANALYSIS REPORT is present, reference it in answers and in edit proposals.
 - In answers and proposals, mention **where** on the timeline (seconds, clip name) when relevant.
 - **Timeline visual (your choice only):** call `present_timeline` when a visual helps answer the question — e.g. "what captions", "show my clips", "where will this edit go", "scan this project", audio levels. Do **not** call it for every message. Plain text/tables are enough when the user only wants facts.
@@ -64,6 +69,13 @@ You think like a professional editor — fast, creative, and precise. The human 
 - For timeline listings use a markdown table with header row, e.g. `| # | name | at_sec | content |`.
 - Use bullet lists for capabilities and numbered lists for step-by-step plans.
 - Keep paragraphs short; separate sections with blank lines."""
+
+ANSWER_SYSTEM_PROMPT = """You are the CapCut AI assistant — friendly, concise, and expert.
+The human may greet you, ask about their project, or want advice. **Do not propose edits** — they only asked to chat or inspect.
+
+For **hi / hello / thanks**: reply in 1–2 short sentences only. Do NOT write a CapCut plan, analysis, or numbered steps.
+For other questions: use ACTIVE PROJECT data in the conversation. Mention 1–2 real facts when helpful (clip count, duration).
+Keep replies short (2–4 sentences) unless they asked for detail. No tools — plain text/markdown only."""
 
 TOOLS = [
     {
@@ -451,6 +463,72 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_draft_operations",
+            "description": (
+                "Propose one or more timeline operations in a single batch. "
+                "Prefer this for splits, deletes, multi-clip edits, or mixed changes. "
+                "Use exact segment_id / text_id from WORKING SLICE."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Short human-readable summary of the edit plan",
+                    },
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {
+                                    "type": "string",
+                                    "description": (
+                                        "segment.split | segment.delete | segment.set | segment.move | "
+                                        "segment.trim | segment.hide | segment.show | transition.add | "
+                                        "transition.remove | transition.update | clip.speed | clip.volume | "
+                                        "clip.reorder | text.update | text.batch_update | effect.add | "
+                                        "effect.remove | music.add | music.replace"
+                                    ),
+                                },
+                                "segment_id": {"type": "string"},
+                                "text_id": {"type": "string"},
+                                "at_sec": {"type": "number"},
+                                "start_sec": {"type": "number"},
+                                "duration_sec": {"type": "number"},
+                                "field": {"type": "string"},
+                                "value": {},
+                                "speed": {"type": "number"},
+                                "volume": {"type": "number"},
+                                "query": {"type": "string"},
+                                "name": {"type": "string"},
+                                "content": {"type": "string"},
+                                "segment_id_a": {"type": "string"},
+                                "segment_id_b": {"type": "string"},
+                                "effect_id": {"type": "string"},
+                                "transition_id": {"type": "string"},
+                                "updates": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "text_id": {"type": "string"},
+                                            "content": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                            "required": ["op"],
+                        },
+                    },
+                },
+                "required": ["operations", "summary"],
+            },
+        },
+    },
 ]
 
 def _to_responses_tools(tools: list[dict]) -> list[dict]:
@@ -485,6 +563,7 @@ PROPOSE_TO_ACTION = {
     "propose_generate_captions": "generate_captions",
     "propose_generate_image": "generate_image",
     "propose_generate_video_clip": "generate_video_clip",
+    "propose_draft_operations": "draft_operations",
 }
 
 IMMEDIATE_TOOLS = {"search_library", "get_director_picks", "present_timeline"}
@@ -511,11 +590,29 @@ def _reply_looks_like_fake_tool(text: str) -> bool:
 
 conversation_history: list[dict] = []
 analysis_context: dict | None = None
+clip_intelligence_context: list[dict] = []
 
 
 def set_analysis_context(analysis: dict | None):
     global analysis_context
     analysis_context = analysis
+
+
+def set_clip_intelligence_context(clips: list[dict] | None) -> None:
+    global clip_intelligence_context
+    clip_intelligence_context = list(clips or [])
+
+
+def hydrate_clip_intelligence_from_cache(project_path: str | None) -> list[dict]:
+    """Load persisted clip understanding (no re-run)."""
+    if not project_path:
+        set_clip_intelligence_context([])
+        return []
+    from analysis.clip_intelligence import load_project_intelligence
+
+    clips = load_project_intelligence(project_path)
+    set_clip_intelligence_context(clips)
+    return clips
 
 
 @dataclass
@@ -529,6 +626,7 @@ class PendingAction:
 class ChatResult:
     reply: str
     pending_actions: list[PendingAction] = field(default_factory=list)
+    thinking: str = ""
 
 
 def _tool_to_pending(tool_name: str, args: dict) -> PendingAction | list[PendingAction]:
@@ -538,6 +636,13 @@ def _tool_to_pending(tool_name: str, args: dict) -> PendingAction | list[Pending
             action=action,
             params={"updates": args["updates"]},
             description=describe_action(action, {"updates": args["updates"]}),
+        )
+    if action == "draft_operations":
+        ops = args.get("operations", [])
+        return PendingAction(
+            action=action,
+            params={"operations": ops},
+            description=args.get("summary") or describe_action(action, {"operations": ops}),
         )
     return PendingAction(
         action=action,
@@ -587,14 +692,20 @@ def _execute_immediate_tool(
 
 
 def _collect_from_response(response) -> tuple[str, list[PendingAction], list[dict]]:
+    from agent.runtime.tools import normalize_tool_name
+
     pending: list[PendingAction] = []
     reply_parts: list[str] = []
     immediate_calls: list[dict] = []
 
     for item in response.output:
         if item.type == "function_call":
-            tool_name = (item.name or "").split("<|")[0].strip()
-            args = json.loads(item.arguments)
+            tool_name = normalize_tool_name((item.name or "").split("<|")[0].strip())
+            try:
+                args = json.loads(item.arguments or "{}")
+            except json.JSONDecodeError:
+                logger.warning("Bad tool JSON from model: %s", item.arguments)
+                continue
             if tool_name in IMMEDIATE_TOOLS:
                 immediate_calls.append({
                     "call_id": getattr(item, "call_id", None) or getattr(item, "id", ""),
@@ -607,6 +718,8 @@ def _collect_from_response(response) -> tuple[str, list[PendingAction], list[dic
                     pending.extend(result)
                 else:
                     pending.append(result)
+            else:
+                logger.warning("Unknown propose tool from model: %s", tool_name)
         elif item.type == "message":
             for content in item.content:
                 if content.type == "output_text" and content.text:
@@ -838,13 +951,19 @@ def _build_heuristic_plan(
     if analysis_context and ("energetic" in msg or "pacing" in msg or "trim" in msg):
         pending.extend(_analysis_pacing_actions(summary))
 
-    if "transition" in msg or "pull" in msg:
+    if "transition" in msg or "pull" in msg or any(
+        kw in msg for kw in ("better", "improve", "make it", "make this", "anything")
+    ):
         pull_hits = search_catalog("pull in", "transition", limit=1)
         query = pull_hits[0]["name"] if pull_hits else "Pull in"
         resource_id = pull_hits[0]["resource_id"] if pull_hits else None
-        for clip in sorted_clips[:-1]:
-            if clip["segment_id"] in has_transitions:
-                continue
+        gaps = [
+            clip for clip in sorted_clips[:-1]
+            if clip["segment_id"] not in has_transitions
+        ]
+        if not gaps and sorted_clips[:-1]:
+            gaps = sorted_clips[:-1][:1]
+        for clip in gaps:
             params: dict = {
                 "segment_id": clip["segment_id"],
                 "query": query,
@@ -883,28 +1002,97 @@ Tell them clearly: pick their project from the dropdown first — timeline quest
 Do NOT invent captions, clips, or timeline visuals. Do NOT output tool_code, present_timeline, or fake code."""
 
 
+def _is_simple_greeting(message: str) -> bool:
+    m = message.strip().lower().rstrip("!?.")
+    if m in ("hi", "hello", "hey", "yo", "sup", "thanks", "thank you", "hi there", "hello there"):
+        return True
+    if len(m) > 20:
+        return False
+    edit_words = ("edit", "caption", "music", "transition", "video", "clip", "timeline", "make", "add", "fix", "blog")
+    return not any(w in m for w in edit_words)
+
+
+def _looks_like_edit_request(message: str) -> bool:
+    m = message.lower()
+    markers = (
+        "transition", "music", "caption", "effect", "trim", "speed",
+        "add ", "remove", "change", "make it", "make this", "better",
+        "improve", "reorder", "sticker", "image", "anything",
+    )
+    return any(w in m for w in markers)
+
+
+def _looks_like_thinking_leak(text: str) -> bool:
+    t = text.lower()
+    if len(text) > 350:
+        return True
+    leak_markers = (
+        "thinking process", "analyze the request", "clip intelligence",
+        "evaluate the existing", "**goal:**", "numbered list",
+    )
+    return any(m in t for m in leak_markers)
+
+
 def _run_streaming_chat(
     input_items: list[dict],
     emit: EventEmitter | None,
+    *,
+    instructions: str = NO_PROJECT_PROMPT,
+    max_output_tokens: int = 512,
+    agent: str = "chat",
+    think: bool | None = None,
 ) -> ChatResult:
-    """Stream a short chat reply (no tools, no huge project dump)."""
+    """Stream a chat reply (no tools)."""
     from agent.runtime.model import stream_model_text
 
     emit_step(emit, "model", "Composing reply…")
-    response_start(emit)
+    thinking_started = False
+    thinking_parts: list[str] = []
     parts: list[str] = []
-    for delta in stream_model_text(
-        instructions=NO_PROJECT_PROMPT,
+    answer_started = False
+    for channel, delta in stream_model_text(
+        instructions=instructions,
         input_items=input_items,
         tools=None,
-        max_output_tokens=512,
+        max_output_tokens=max_output_tokens,
+        think=think,
     ):
+        if channel == "thinking":
+            thinking_parts.append(delta)
+            if not thinking_started:
+                model_thinking_start(emit, agent=agent)
+                thinking_started = True
+            model_thinking_delta(emit, delta)
+            continue
+        if thinking_started and not answer_started:
+            model_thinking_end(emit)
+            thinking_started = False
+        if not answer_started:
+            response_start(emit)
+            answer_started = True
         parts.append(delta)
         emit_text_delta(emit, delta)
-    reply = "".join(parts).strip() or "How can I help with your CapCut project?"
+    if thinking_started:
+        model_thinking_end(emit)
+    reply = "".join(parts).strip()
+    thinking = "".join(thinking_parts).strip()
+    if not reply and thinking:
+        from agent.runtime.ollama_provider import extract_visible_reply_from_thinking
+
+        candidate = extract_visible_reply_from_thinking(thinking)
+        if candidate and not _looks_like_thinking_leak(candidate):
+            reply = candidate
+    if not reply or _looks_like_thinking_leak(reply):
+        reply = "Hi! How can I help with your CapCut project?"
+    if not parts and reply and not answer_started:
+        if not answer_started:
+            response_start(emit)
+        from agent.streaming import emit_text_chunks
+
+        emit_text_chunks(emit, reply, chunk_chars=10)
     emit_step(emit, "model", "Reply complete", "done")
     conversation_history.append({"role": "assistant", "content": reply})
-    return ChatResult(reply=reply, pending_actions=[])
+    return ChatResult(reply=reply, pending_actions=[], thinking=thinking)
 
 
 def _append_response_to_input(input_items: list, response) -> None:
@@ -941,6 +1129,8 @@ def hydrate_analysis_from_cache(project_path: str | None) -> None:
             "issues": cached["issues"],
             "clips_analyzed": cached["clips_analyzed"],
         })
+        if cached.get("clip_intelligence"):
+            set_clip_intelligence_context(cached["clip_intelligence"])
 
 
 def _maybe_run_audio_analysis(
@@ -1003,9 +1193,11 @@ def stream_agent_events(
     user_message: str,
     project_path: str | None = None,
     emit: EventEmitter | None = None,
+    *,
+    answer_only: bool = False,
 ) -> ChatResult:
     """Run the agent loop; emit step/tool events in real time when emit is provided."""
-    from core.slices import get_timeline_summary
+    from core.retrieve_context import retrieve_context
 
     context = ""
     summary: dict | None = None
@@ -1020,17 +1212,33 @@ def stream_agent_events(
                 emit, "load_project", "Timeline loaded", "done",
                 f"{clip_count} video clip(s), {overview.get('transition_count', 0)} transition(s)",
             )
-            timeline_compact = get_timeline_summary(project_path)
-            context = f"\n\nACTIVE PROJECT:\n{json.dumps(timeline_compact, indent=2)}"
+            if _is_simple_greeting(user_message):
+                dur = overview.get("duration_sec") or overview.get("total_duration_sec") or 0
+                context = (
+                    f"\n\nPROJECT (brief): {clip_count} clip(s), "
+                    f"{float(dur):.1f}s — user sent a short greeting."
+                )
+                emit_step(emit, "retrieve", "Greeting — light context", "done")
+            else:
+                retrieved = retrieve_context(
+                    project_path,
+                    user_message,
+                    analysis=analysis_context,
+                )
+                emit_step(
+                    emit, "retrieve",
+                    "Loaded timeline slice", "done",
+                    ", ".join(retrieved.domains) + (
+                        f" — {retrieved.retrieval_notes[0]}" if retrieved.retrieval_notes else ""
+                    ),
+                )
+                context = f"\n\n{retrieved.to_prompt_block()}"
+                timeline_compact = retrieved.catalog
             if clip_count == 0:
                 context += (
                     "\n\nNOTE: Timeline shows 0 video clips on disk. "
                     "If the user sees clips in CapCut, they may need Cmd+S and Home before edits."
                 )
-            if analysis_context:
-                score = analysis_context.get("score", "?")
-                emit_step(emit, "analysis", f"Using FFmpeg analysis (score {score}/100)", "done")
-                context += f"\n\nANALYSIS REPORT (FFmpeg):\n{json.dumps(analysis_context, indent=2)}"
         except Exception as e:
             emit_step(emit, "load_project", "Failed to read project", "error", str(e))
             context = f"\n\nError reading project: {e}"
@@ -1044,6 +1252,17 @@ def stream_agent_events(
         input_items = [{"role": m["role"], "content": m["content"]} for m in conversation_history]
         return _run_streaming_chat(input_items, emit)
 
+    if answer_only:
+        input_items = [{"role": m["role"], "content": m["content"]} for m in conversation_history]
+        simple = _is_simple_greeting(user_message)
+        return _run_streaming_chat(
+            input_items,
+            emit,
+            instructions=ANSWER_SYSTEM_PROMPT,
+            max_output_tokens=256 if simple else 384,
+            agent="chat",
+        )
+
     tools = _to_responses_tools(TOOLS)
     input_items: list[dict] = [
         {"role": msg["role"], "content": msg["content"]}
@@ -1052,6 +1271,7 @@ def stream_agent_events(
 
     pending: list[PendingAction] = []
     reply_parts: list[str] = []
+    thinking_parts: list[str] = []
     nudged = False
     llm_failed = False
 
@@ -1065,6 +1285,8 @@ def stream_agent_events(
             tools=tools,
             temperature=0.5,
             max_output_tokens=1536,
+            agent="chat",
+            emit=emit,
         )
         if response is None:
             llm_failed = True
@@ -1087,9 +1309,6 @@ def stream_agent_events(
 
         if step_reply:
             reply_parts.append(step_reply)
-            if emit:
-                response_start(emit)
-                emit_text_chunks(emit, step_reply, chunk_chars=16)
         from agent.timeline_anchor import describe_timeline_target
 
         for item in step_pending:
@@ -1132,16 +1351,35 @@ def stream_agent_events(
 
     if llm_failed and not reply:
         reply = (
-            "The AI model is temporarily unavailable (rate limit or API error on Groq/Gemini). "
-            "Try again in a moment, or set LLM_PROVIDER=gemini / LLM_PROVIDER=groq to force one provider."
+            "The AI model is temporarily unavailable. "
+            "**Local:** run `ollama serve` and `ollama pull gemma4` (set LLM_PROVIDER=ollama). "
+            "**Cloud:** check Groq/Gemini keys or rate limits."
         )
         emit_step(emit, "model", "Model unavailable", "error")
 
     pending = _dedupe_pending(pending)
 
+    if not pending and summary and _looks_like_edit_request(user_message):
+        pending = _build_heuristic_plan(user_message, summary, project_path)
+        if pending and emit:
+            from agent.timeline_anchor import describe_timeline_target
+
+            for item in pending:
+                anchor = describe_timeline_target(item.action, item.params, summary)
+                emit_proposal(
+                    emit, item.description, item.action,
+                    anchor=anchor or None, agent="Edit Agent",
+                )
+
     if pending:
         plan = "\n".join(f"  • {a.description}" for a in pending)
-        reply = (reply + "\n\n**Planned changes (awaiting your approval):**\n" + plan).strip()
+        if reply:
+            reply = (reply + "\n\n**Planned changes (awaiting your approval):**\n" + plan).strip()
+        else:
+            reply = (
+                f"I've queued **{len(pending)}** change(s) for your timeline:\n{plan}\n\n"
+                "Review the amber **Approve** bar when you're ready."
+            )
 
     if not reply and analysis_context and summary:
         score = analysis_context.get("score", "?")
@@ -1153,16 +1391,32 @@ def stream_agent_events(
             f"**Available auto-fixes:**\n{fix_lines}"
         )
 
-    reply = reply or "How can I help with your CapCut project?"
+    if not reply:
+        if _looks_like_edit_request(user_message):
+            reply = (
+                "I understood your edit request but couldn't queue changes this time. "
+                "Try: **add pull-in transitions between clips** or enable **Force team** for a full pass."
+            )
+        else:
+            reply = "How can I help with your CapCut project?"
     conversation_history.append({"role": "assistant", "content": reply})
-    return ChatResult(reply=reply, pending_actions=pending)
+    return ChatResult(
+        reply=reply,
+        pending_actions=pending,
+        thinking="\n\n".join(thinking_parts).strip(),
+    )
 
 
 def chat(user_message: str, project_path: str | None = None) -> ChatResult:
     return stream_agent_events(user_message, project_path)
 
 
-def iter_agent_sse(user_message: str, project_path: str | None = None):
+def iter_agent_sse(
+    user_message: str,
+    project_path: str | None = None,
+    *,
+    answer_only: bool = False,
+):
     """Yield SSE lines while the agent runs (threaded producer)."""
     import queue
     import threading
@@ -1180,7 +1434,12 @@ def iter_agent_sse(user_message: str, project_path: str | None = None):
 
     def run() -> None:
         try:
-            result_box["result"] = stream_agent_events(user_message, project_path, emit=emit)
+            result_box["result"] = stream_agent_events(
+                user_message,
+                project_path,
+                emit=emit,
+                answer_only=answer_only,
+            )
         except Exception as e:
             logger.exception("Agent stream error")
             result_box["error"] = str(e)
@@ -1211,9 +1470,13 @@ def iter_agent_sse(user_message: str, project_path: str | None = None):
         "reply": result.reply,
         "pending_actions": action_dicts,
     }
+    if result.thinking:
+        done_event["thinking"] = result.thinking
     if project_path and action_dicts:
         from agent.diff import compute_edit_diff
+        from core.project_ledger import record_proposed_edits
 
+        record_proposed_edits(project_path, action_dicts)
         done_event["edit_diff"] = compute_edit_diff(project_path, action_dicts)
     yield sse_line(done_event)
 
@@ -1232,6 +1495,9 @@ def record_assistant_reply(reply: str) -> None:
 
 def confirm_actions(actions: list[dict], project_path: str) -> str:
     results = execute_actions(actions, project_path)
+    from core.project_ledger import record_applied_edits
+
+    record_applied_edits(project_path, actions)
     reply = format_execute_reply(results)
     record_assistant_reply(reply)
     return reply
