@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from agent.brain import set_analysis_context
+from agent.brain import set_analysis_context, set_clip_intelligence_context
 from agent.streaming import sse_line
 from analysis.analyzer import (
     ISSUE_LABELS,
@@ -21,6 +21,7 @@ from analysis.media_preview import (
     clip_thumbnail_base64,
     merge_waveform_peaks,
 )
+from analysis.clip_intelligence import iter_understand_sse, director_clip_summaries
 from analysis.suggestions import build_report_text, issues_to_actions
 from capcut.reader import get_project_summary, read_project
 
@@ -162,6 +163,13 @@ def iter_analyze_sse(project_path: str, max_clips: int = 8):
         "detail": "Volume and clarity scanned",
     })
 
+    clip_intel: list[dict] = []
+    for event in iter_understand_sse(project_path, max_clips=max_clips):
+        yield sse_line(event)
+        if event.get("type") == "understand_done":
+            clip_intel = event.get("clips") or []
+    set_clip_intelligence_context(clip_intel)
+
     yield sse_line({
         "type": "phase",
         "id": "suggestions",
@@ -200,6 +208,8 @@ def iter_analyze_sse(project_path: str, max_clips: int = 8):
         }),
         "waveform_peaks": combined,
         "audio_markers": audio_markers,
+        "clip_intelligence": clip_intel,
+        "clip_intelligence_summary": director_clip_summaries(clip_intel) if clip_intel else [],
     }
 
     set_cached(project_path, result)
