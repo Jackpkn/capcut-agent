@@ -105,6 +105,43 @@ def text_delta(emit: EventEmitter | None, content: str) -> None:
     emit({"type": "text_delta", "content": content})
 
 
+def model_thinking_start(emit: EventEmitter | None, *, agent: str | None = None) -> None:
+    if not emit:
+        return
+    payload: dict[str, Any] = {"type": "model_thinking_start"}
+    if agent:
+        payload["agent"] = agent
+    emit(payload)
+
+
+def model_thinking_delta(emit: EventEmitter | None, content: str) -> None:
+    if not emit:
+        return
+    emit({"type": "model_thinking", "content": content})
+
+
+def model_thinking_end(emit: EventEmitter | None) -> None:
+    if not emit:
+        return
+    emit({"type": "model_thinking_end"})
+
+
+def emit_thinking_chunks(
+    emit: EventEmitter | None,
+    text: str,
+    *,
+    agent: str | None = None,
+    chunk_chars: int = 28,
+) -> None:
+    """Stream captured model reasoning to the UI."""
+    if not emit or not text.strip():
+        return
+    model_thinking_start(emit, agent=agent)
+    for i in range(0, len(text), chunk_chars):
+        model_thinking_delta(emit, text[i : i + chunk_chars])
+    model_thinking_end(emit)
+
+
 def response_start(emit: EventEmitter | None) -> None:
     if not emit:
         return
@@ -151,6 +188,7 @@ def should_surface_trace_event(event: dict[str, Any]) -> bool:
     if kind in (
         "agent_thinking", "agent_message", "tool_call", "tool_result",
         "text_delta", "response_start",
+        "model_thinking", "model_thinking_start", "model_thinking_end",
     ):
         return False
     if kind in (
