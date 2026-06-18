@@ -92,6 +92,10 @@ def run_scene_planner(
     priority -= 1
     tasks.append(task)
 
+  from core.task_deps import order_tasks as sort_chapter_tasks
+
+  tasks = sort_chapter_tasks(tasks)
+
   critic_notes = critique_plan(brief, pending, full_summary)
   if result.reply:
     critic_notes.insert(0, f"{chapter.label}: {result.reply[:200]}")

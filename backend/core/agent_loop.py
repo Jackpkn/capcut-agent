@@ -13,6 +13,7 @@ from agent.streaming import sse_line
 from core.models import EditSession, SessionStatus, TaskStatus
 from core.slices import get_timeline_summary
 from core.task_queue import get_session, is_paused, update_session
+from core.task_deps import order_action_dicts, order_tasks
 
 EventEmitter = Callable[[dict], None]
 
@@ -202,6 +203,7 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
             })
 
     session.tasks = all_tasks
+    session.tasks = order_tasks(session.tasks)
     session.critic_notes = all_notes
     session.session_memory = memory.to_dict()
     session.brief_markdown = brief_to_markdown(brief)
@@ -549,15 +551,13 @@ def _approved_tasks_for_apply(session: EditSession) -> list:
 
 def apply_session_tasks(session_id: str) -> tuple[list[str], str]:
     """Apply all QA-approved tasks in one batch."""
-    from agent.actions import execute_actions
-    from capcut.project_ui import apply_with_ui_handoff
-    from capcut.cdp import sync_capcut
+    from capcut.apply_service import apply_edits_immediate
 
     session = get_session(session_id)
     if not session:
         raise ValueError(f"Session not found: {session_id}")
 
-    tasks = _approved_tasks_for_apply(session)
+    tasks = order_tasks(_approved_tasks_for_apply(session))
     if not tasks:
         raise ValueError("No approved tasks to apply")
 
@@ -569,25 +569,23 @@ def apply_session_tasks(session_id: str) -> tuple[list[str], str]:
     session.status = SessionStatus.APPLYING
     update_session(session)
 
-    results, suffix = apply_with_ui_handoff(
-        session.project_path,
-        lambda: execute_actions(actions, session.project_path),
-    )
-    sync_capcut(session.project_path)
+    outcome = apply_edits_immediate(session.project_path, actions)
 
-    for t, res in zip(tasks, results):
+    for t, res in zip(tasks, outcome.results):
         if res.startswith("Failed to apply:"):
             t.status = TaskStatus.FAILED
             t.agent_reasoning += f" Error: {res}"
         else:
             t.status = TaskStatus.DONE
 
-    _record_applied_actions(session, actions)
+    from core.project_ledger import sync_session_ledger
     from agent.runtime.agent_log import agent as log_agent
+
+    sync_session_ledger(session)
     log_agent("apply done", session_id=session.id, actions=len(actions))
     session.status = SessionStatus.DONE
     update_session(session)
-    return results, suffix
+    return outcome.results, outcome.reply
 
 
 def iter_apply_actions_sse(
@@ -598,7 +596,6 @@ def iter_apply_actions_sse(
 ) -> Iterator[str]:
     """Apply actions one-by-one with CDP reload (works without a live session)."""
     from agent.actions import execute_action
-    from agent.brain import format_execute_reply
     from capcut.cdp import sync_capcut
     from capcut.project_ui import is_project_locked, reopen_project
 
@@ -691,34 +688,40 @@ def iter_apply_actions_sse(
         })
 
         if session:
-            _record_applied_actions(session, actions)
+            from core.project_ledger import sync_session_ledger
+
+            sync_session_ledger(session)
             session.status = SessionStatus.DONE
             update_session(session)
-        else:
-            from core.project_ledger import record_applied_edits
 
-            record_applied_edits(project_path, actions)
-
-        reply = format_execute_reply(results)
-        if reopened:
-            reply += (
-                "\n\nProject reopened in CapCut. Scrub the timeline to verify each change."
-            )
-
+        extra_lines: list[str] = []
         skipped = sum(
             1 for r in results
             if "no change needed" in r.lower() or "skipped" in r.lower()
         )
         if skipped:
-            reply += (
-                f"\n\n_{skipped} step(s) made no visible change (already at target)._"
+            extra_lines.append(
+                f"_{skipped} step(s) made no visible change (already at target)._"
             )
         if is_project_locked(project_path):
-            reply += (
-                "\n\n**CapCut still has the project open** — edits are on disk but the "
+            extra_lines.append(
+                "**CapCut still has the project open** — edits are on disk but the "
                 "preview may look unchanged. Click **Home** (top-left), wait 3 seconds, "
                 "then reopen your project to refresh."
             )
+
+        from capcut.apply_service import finalize_stream_apply
+
+        outcome = finalize_stream_apply(
+            project_path,
+            actions,
+            results,
+            reopened=reopened,
+            extra_lines=extra_lines,
+            record_ledger=True,
+            record_episodic=True,
+        )
+        reply = outcome.reply
 
         yield sse_line({
             "type": "done",
@@ -742,7 +745,7 @@ def resolve_team_apply_actions(
     """Resolve project + actions from session or request body fallback."""
     session = get_session(session_id)
     if session:
-        tasks = _approved_tasks_for_apply(session)
+        tasks = order_tasks(_approved_tasks_for_apply(session))
         if not tasks:
             raise ValueError("No approved tasks to apply")
         return session.project_path, [
@@ -750,7 +753,7 @@ def resolve_team_apply_actions(
             for t in tasks
         ]
     if project_path and actions:
-        return project_path, actions
+        return project_path, order_action_dicts(actions)
     raise ValueError(
         "Team session expired (server restarted). Resend your edit request, "
         "or approve again — the UI will resubmit the planned actions."

@@ -9,9 +9,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from capcut.cdp import sync_capcut
 from capcut.guard import can_write_safely
-from capcut.project_ui import prepare_project_for_write, reopen_project
+from capcut.project_ui import prepare_project_for_write
 
 logger = logging.getLogger(__name__)
 
@@ -82,27 +81,18 @@ def open_capcut() -> bool:
 
 
 def _apply_now(item: QueuedApply) -> None:
-    from agent.actions import execute_actions
-    from agent.brain import format_execute_reply, record_assistant_reply
+    from capcut.apply_service import apply_edits_immediate
+    from agent.brain import record_assistant_reply
 
     item.status = "applying"
     _notify()
     try:
-        results = execute_actions(item.actions, item.project_path)
-        sync_capcut(item.project_path)
-        from core.project_ledger import record_applied_edits
-
-        record_applied_edits(item.project_path, item.actions)
-        item.results = results
+        outcome = apply_edits_immediate(item.project_path, item.actions)
+        item.results = outcome.results
         item.status = "done"
-        item.message = format_execute_reply(results)
+        item.message = outcome.reply
         record_assistant_reply(item.message)
-        logger.info("Auto-applied %d action(s)", len(results))
-        if reopen_project(item.project_path):
-            item.message += "\n\nProject reopened in CapCut with your edits."
-        else:
-            open_capcut()
-            item.message += f"\n\nEdits saved — open project in CapCut."
+        logger.info("Auto-applied %d action(s)", len(outcome.results))
     except Exception as e:
         logger.exception("Auto-apply failed")
         item.status = "failed"

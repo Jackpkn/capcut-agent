@@ -1300,6 +1300,9 @@ def iter_agent_sse(
         {"action": a.action, "params": a.params, "description": a.description}
         for a in result.pending_actions
     ]
+    from core.task_deps import order_action_dicts
+
+    action_dicts = order_action_dicts(action_dicts)
     reply = result.reply
     done_event: dict = {
         "type": "done",

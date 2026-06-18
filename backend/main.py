@@ -32,7 +32,7 @@ from capcut.apply_queue import (
     start_apply_poller,
 )
 from capcut.guard import assert_safe_to_write, can_write_safely, is_capcut_running
-from capcut.project_ui import apply_with_ui_handoff, capcut_sync_hint, reopen_project
+from capcut.project_ui import capcut_sync_hint, reopen_project
 from capcut.writer import _flush_project
 
 logging.basicConfig(level=logging.INFO)
@@ -328,6 +328,9 @@ def queue_apply_endpoint(req: ExecuteRequest):
     if not req.actions:
         raise HTTPException(status_code=400, detail="No actions to execute")
     actions = [{"action": a.action, "params": a.params, "description": a.description} for a in req.actions]
+    from core.task_deps import order_action_dicts
+
+    actions = order_action_dicts(actions)
     try:
         assert_safe_to_write(req.project_path)
     except RuntimeError:
@@ -343,20 +346,11 @@ def queue_apply_endpoint(req: ExecuteRequest):
             "status": item.status,
         }
 
-    from agent.actions import execute_actions
-    from core.episodic_memory import record_approval
-    from core.project_ledger import record_applied_edits
+    from capcut.apply_service import apply_edits_immediate
 
-    results, suffix = apply_with_ui_handoff(
-        req.project_path,
-        lambda: execute_actions(actions, req.project_path),
-    )
-    record_applied_edits(req.project_path, actions)
-    record_approval(req.project_path, actions)
-    sync_capcut(req.project_path)
-    reply = format_execute_reply(results) + suffix
-    record_assistant_reply(reply)
-    return {"mode": "immediate", "reply": reply, "queued": False}
+    outcome = apply_edits_immediate(req.project_path, actions)
+    record_assistant_reply(outcome.reply)
+    return {"mode": "immediate", "reply": outcome.reply, "queued": False}
 
 
 @app.get("/queue/status")
@@ -403,6 +397,9 @@ def execute_stream_endpoint(req: ExecuteRequest):
     if not req.actions:
         raise HTTPException(status_code=400, detail="No actions to execute")
     actions = [{"action": a.action, "params": a.params, "description": a.description} for a in req.actions]
+    from core.task_deps import order_action_dicts
+
+    actions = order_action_dicts(actions)
 
     def wrapped():
         from agent.streaming import sse_line
@@ -464,20 +461,21 @@ def execute_stream_endpoint(req: ExecuteRequest):
         })
 
         if last_done and last_done.get("results"):
-            results = last_done["results"]
-            reply = format_execute_reply(results)
-            sync_hint = capcut_sync_hint(req.project_path, reopened=reopened)
-            reply += f"\n\n{sync_hint}"
-            record_assistant_reply(reply)
-            from core.episodic_memory import record_approval
+            from capcut.apply_service import finalize_stream_apply
 
-            record_approval(req.project_path, actions)
-            sync_capcut(req.project_path)
+            results = last_done["results"]
+            outcome = finalize_stream_apply(
+                req.project_path,
+                actions,
+                results,
+                reopened=reopened,
+            )
+            record_assistant_reply(outcome.reply)
             yield sse_line({
                 "type": "done",
-                "reply": reply,
+                "reply": outcome.reply,
                 "results": results,
-                "capcut_sync_hint": sync_hint,
+                "capcut_sync_hint": outcome.sync_hint,
                 "reopened": reopened,
             })
 
@@ -498,21 +496,12 @@ def execute_endpoint(req: ExecuteRequest):
             {"action": a.action, "params": a.params, "description": a.description}
             for a in req.actions
         ]
-        from agent.actions import execute_actions
-        from core.episodic_memory import record_approval
-        from core.project_ledger import record_applied_edits
+        from capcut.apply_service import apply_edits_immediate
 
-        results, suffix = apply_with_ui_handoff(
-            req.project_path,
-            lambda: execute_actions(actions, req.project_path),
-        )
-        record_applied_edits(req.project_path, actions)
-        record_approval(req.project_path, actions)
-        reply = format_execute_reply(results) + suffix
-        record_assistant_reply(reply)
+        outcome = apply_edits_immediate(req.project_path, actions)
+        record_assistant_reply(outcome.reply)
         cdp_result = sync_capcut(req.project_path)
-        reopen_project(req.project_path)
-        return {"reply": reply, "cdp": cdp_result, "reload_required": False}
+        return {"reply": outcome.reply, "cdp": cdp_result, "reload_required": False}
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -685,8 +674,7 @@ def team_approve(session_id: str):
         raise HTTPException(status_code=409, detail=str(e)) from e
 
     try:
-        results, suffix = apply_session_tasks(session_id)
-        reply = format_execute_reply(results) + suffix
+        results, reply = apply_session_tasks(session_id)
         record_assistant_reply(reply)
         return {"reply": reply, "results": results}
     except ValueError as e:

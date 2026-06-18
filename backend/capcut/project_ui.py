@@ -181,7 +181,7 @@ def reopen_project(project_path: str) -> bool:
     return open_draft_by_name(name)
 
 
-def apply_with_ui_handoff(project_path: str, apply_fn) -> tuple[list[str], str]:
+def apply_with_ui_handoff(project_path: str, apply_fn) -> tuple[list[str], str, bool]:
     """
     Close project in CapCut UI → run apply_fn() → reopen project.
     apply_fn should write draft_info and return result strings.
@@ -198,15 +198,14 @@ def apply_with_ui_handoff(project_path: str, apply_fn) -> tuple[list[str], str]:
     results = apply_fn()
     time.sleep(0.8)
 
+    reopened = False
     if mode == "ui_handoff":
-        if reopen_project(project_path):
-            suffix = "\n\nProject reopened in CapCut with your edits."
-        else:
-            suffix = f"\n\nEdits saved. Open project **{draft_name_from_path(project_path)}** in CapCut."
+        reopened = reopen_project(project_path)
+        suffix = f"\n\n{capcut_sync_hint(project_path, reopened=reopened)}"
     else:
-        suffix = "\n\nEdits saved to disk."
+        suffix = f"\n\n{capcut_sync_hint(project_path, reopened=False)}"
 
-    return results, suffix
+    return results, suffix, reopened
 
 
 def capcut_sync_hint(project_path: str, *, reopened: bool) -> str:

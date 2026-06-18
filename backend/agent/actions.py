@@ -526,11 +526,6 @@ def iter_execute_sse(actions: list[dict], project_path: str):
         return
 
     results = result_box["results"]
-    from agent.brain import format_execute_reply
-    from core.project_ledger import record_applied_edits
-
-    record_applied_edits(project_path, actions)
-
     yield sse_line({
         "type": "done",
         "reply": format_execute_reply(results),
