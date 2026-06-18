@@ -1242,12 +1242,10 @@ def add_text_overlay(
     )
 
 
-def _is_background_music_name(name: str) -> bool:
-    return bool(name) and not name.upper().startswith("VID_")
-
-
 def _mute_background_music_segments(data: dict) -> int:
     """Remove non-camera music segments so replace does not stack extra beds."""
+    from capcut.media_names import is_background_music_name
+
     materials: dict[str, dict] = {}
     for items in data.get("materials", {}).values():
         if isinstance(items, list):
@@ -1263,7 +1261,7 @@ def _mute_background_music_segments(data: dict) -> int:
         for seg in track.get("segments", []):
             mat = materials.get(seg.get("material_id", ""), {})
             name = mat.get("name") or mat.get("material_name") or ""
-            if _is_background_music_name(name):
+            if is_background_music_name(name):
                 removed += 1
                 continue
             kept.append(seg)

@@ -6,6 +6,7 @@ import copy
 
 from agent.director import PRESETS
 from capcut.catalog import search_catalog
+from capcut.media_names import is_background_music_name
 
 
 def effective_preset_config(preset_id: str) -> dict:
@@ -17,7 +18,7 @@ def timeline_music_names(summary: dict) -> set[str]:
     names: set[str] = set()
     for audio in summary.get("audio_clips", []):
         name = (audio.get("name") or "").lower().strip()
-        if name and not name.upper().startswith("VID_"):
+        if is_background_music_name(name):
             names.add(name)
     return names
 

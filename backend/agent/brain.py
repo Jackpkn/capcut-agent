@@ -22,6 +22,7 @@ from agent.streaming import (
 from analysis.suggestions import issues_to_actions
 from capcut.catalog import search_catalog
 from capcut.library import director_picks, search_library
+from capcut.media_names import is_background_music_name
 from capcut.reader import get_project_summary, read_project
 
 load_dotenv()
@@ -791,7 +792,7 @@ def _project_already_has_music(summary: dict, music_name: str = "") -> bool:
         return False
     for audio in summary.get("audio_clips", []):
         name = audio.get("name") or ""
-        if name and not name.upper().startswith("VID_"):
+        if is_background_music_name(name):
             return True
     return False
 

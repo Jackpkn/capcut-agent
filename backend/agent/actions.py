@@ -145,6 +145,25 @@ def describe_action(action: str, params: dict) -> str:
 
 
 def execute_action(action: str, params: dict, project_path: str) -> str:
+    def _resolve_music(params: dict) -> dict:
+        music = find_asset(params.get("query", params.get("name", "")), "music")
+        if not music:
+            # Fallback to any music in catalog
+            from capcut.catalog import search_catalog
+
+            hits = search_catalog("", "music", limit=1)
+            if hits:
+                music = hits[0]
+                logger.warning(
+                    "Music '%s' not found in catalog. Using fallback: '%s' (%s)",
+                    params,
+                    music.get("name"),
+                    music.get("resource_id"),
+                )
+        if not music:
+            raise ValueError(f"Music not found in catalog: {params.get('query', params.get('name'))}")
+        return ensure_asset_cached(music, project_path=project_path)
+
     if action == "update_text":
         existing = _get_existing_text_content(project_path, params["text_id"])
         content = _build_text_content(params["new_content"], existing)
@@ -217,17 +236,7 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
         return "Swapped clip positions"
 
     if action == "add_music":
-        music = find_asset(params.get("query", params.get("name", "")), "music")
-        if not music:
-            # Fallback to any music in catalog
-            from capcut.catalog import search_catalog
-            hits = search_catalog("", "music", limit=1)
-            if hits:
-                music = hits[0]
-                logger.warning(f"Music '{params}' not found in catalog. Using fallback: '{music['name']}' ({music['resource_id']})")
-        if not music:
-            raise ValueError(f'Music not found in catalog: {params.get("query", params.get("name"))}')
-        music = ensure_asset_cached(music, project_path=project_path)
+        music = _resolve_music(params)
         result = add_music(
             project_path,
             music_path=music["path"],
@@ -240,17 +249,7 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
         return f'Added music "{result["name"]}" (resource_id {music.get("resource_id")})'
 
     if action == "replace_music":
-        music = find_asset(params.get("query", params.get("name", "")), "music")
-        if not music:
-            # Fallback to any music in catalog
-            from capcut.catalog import search_catalog
-            hits = search_catalog("", "music", limit=1)
-            if hits:
-                music = hits[0]
-                logger.warning(f"Music '{params}' not found in catalog. Using fallback: '{music['name']}' ({music['resource_id']})")
-        if not music:
-            raise ValueError(f'Music not found in catalog: {params.get("query", params.get("name"))}')
-        music = ensure_asset_cached(music, project_path=project_path)
+        music = _resolve_music(params)
         result = replace_music(
             project_path,
             music_path=music["path"],

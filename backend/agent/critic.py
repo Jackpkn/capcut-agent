@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from agent.brain import PendingAction
 from agent.director import EditBrief
+from capcut.media_names import is_background_music_name
 
 
 def critique_plan(
@@ -42,7 +43,7 @@ def critique_plan(
     audio_clips = summary.get("audio_clips", [])
     bg_music = [
         a for a in audio_clips
-        if a.get("name") and not str(a.get("name", "")).upper().startswith("VID_")
+        if is_background_music_name(str(a.get("name", "")))
     ]
     if brief.preset_id == "travel_vlog":
         if bg_music and "replace_music" not in actions and "add_music" not in actions:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from capcut.reader import get_project_summary
+from capcut.media_names import is_background_music_name
 
 
 def _clip_name(summary: dict, segment_id: str) -> str:
@@ -19,7 +20,7 @@ def _background_music_label(summary: dict) -> str:
     names = []
     for audio in summary.get("audio_clips", []):
         name = audio.get("name") or ""
-        if name and not name.upper().startswith("VID_"):
+        if is_background_music_name(name):
             vol = int(audio.get("volume", 1) * 100)
             names.append(f"{name} ({vol}%)")
     return ", ".join(names) if names else "—"
