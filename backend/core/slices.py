@@ -21,9 +21,8 @@ def _compact_clips(clips: list[dict], limit: int = 20) -> list[dict]:
     ]
 
 
-def get_timeline_summary(project_path: str) -> dict:
-    """One-page project view for Director / Planner (no raw JSON)."""
-    summary = get_project_summary(project_path)
+def timeline_summary_from_project_summary(summary: dict) -> dict:
+    """One-page project view from an already-loaded summary (no disk read)."""
     overview = summary.get("overview", {})
     return {
         "duration_sec": overview.get("duration_sec"),
@@ -46,6 +45,11 @@ def get_timeline_summary(project_path: str) -> dict:
             for t in summary.get("text_overlays", [])[:15]
         ],
     }
+
+
+def get_timeline_summary(project_path: str) -> dict:
+    """One-page project view for Director / Planner (no raw JSON)."""
+    return timeline_summary_from_project_summary(get_project_summary(project_path))
 
 
 def get_video_slice(project_path: str) -> dict:

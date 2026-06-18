@@ -22,12 +22,12 @@ def _parent_pid(pid: int) -> int | None:
             ["ps", "-p", str(pid), "-o", "ppid="],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=1,
             check=False,
         )
         line = out.stdout.strip()
         return int(line) if line.isdigit() else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
 
 
@@ -37,16 +37,23 @@ def _process_name(pid: int) -> str:
             ["ps", "-p", str(pid), "-o", "comm="],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=1,
             check=False,
         )
         return out.stdout.strip()
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return ""
+
+
+_host_app_cache: str | None = None
 
 
 def automation_host_app() -> str:
     """Name of the app macOS will attribute UI automation to (walk parent chain)."""
+    global _host_app_cache
+    if _host_app_cache:
+        return _host_app_cache
+
     pid = os.getpid()
     seen: set[int] = set()
     for _ in range(20):
@@ -56,12 +63,14 @@ def automation_host_app() -> str:
         name = _process_name(pid)
         for key, label in _HOST_APPS.items():
             if key in name:
+                _host_app_cache = label
                 return label
         nxt = _parent_pid(pid)
         if nxt is None:
             break
         pid = nxt
-    return "Terminal or Cursor"
+    _host_app_cache = "Terminal or Cursor"
+    return _host_app_cache
 
 
 def ui_automation_enabled() -> bool:
@@ -83,8 +92,12 @@ def ui_automation_enabled() -> bool:
 
 
 def accessibility_report() -> dict:
-    host = automation_host_app()
-    enabled = ui_automation_enabled()
+    try:
+        host = automation_host_app()
+        enabled = ui_automation_enabled()
+    except Exception:
+        host = "Terminal or Cursor"
+        enabled = False
     return {
         "enabled": enabled,
         "host_app": host,

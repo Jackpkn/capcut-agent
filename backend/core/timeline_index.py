@@ -24,8 +24,9 @@ class TimelineIndex:
     chapters: list[Chapter] = field(default_factory=list)
 
     @classmethod
-    def from_project(cls, project_path: str) -> TimelineIndex:
-        summary = get_project_summary(project_path)
+    def from_project(cls, project_path: str, summary: dict | None = None) -> TimelineIndex:
+        if summary is None:
+            summary = get_project_summary(project_path)
         overview = summary.get("overview", {})
         timeline_summary = {
             "duration_sec": overview.get("duration_sec"),
@@ -124,21 +125,3 @@ class TimelineIndex:
         if m:
             return int(m.group(1))
         return None
-
-    def infer_domains(self, message: str) -> set[str]:
-        """Lightweight intent hints — not a router, only retrieval focus."""
-        lower = message.lower()
-        domains: set[str] = set()
-        if any(w in lower for w in ("caption", "text", "subtitle", "overlay", "title")):
-            domains.add("text")
-        if any(w in lower for w in ("music", "audio", "volume", "sound", "duck", "loud", "quiet")):
-            domains.add("audio")
-        if any(w in lower for w in ("transition", "effect", "sticker", "filter", "fade", "mask")):
-            domains.add("effects")
-        if any(w in lower for w in ("clip", "speed", "trim", "cut", "reorder", "pacing", "split")):
-            domains.add("video")
-        if any(w in lower for w in ("scan", "analyze", "health", "issue", "fix")):
-            domains.add("analysis")
-        if not domains:
-            domains.add("overview")
-        return domains

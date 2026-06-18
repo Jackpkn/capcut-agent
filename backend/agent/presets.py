@@ -25,16 +25,15 @@ def plan_from_preset(
     summary: dict,
     project_path: str | None,
 ) -> list:
-    """Preset-driven plan merged with message-specific heuristic rules."""
+    """Preset-driven plan from Director-chosen preset."""
     from agent.brain import (
         PendingAction,
-        _build_heuristic_plan,
         _dedupe_pending,
         _segment_ids_with_transitions,
         _tool_to_pending,
     )
 
-    cfg = effective_preset_config(brief.preset_id, user_message)
+    cfg = effective_preset_config(brief.preset_id)
     clips = sorted(summary.get("video_clips", []), key=lambda c: c["at_sec"])
     pending: list[PendingAction] = []
 
@@ -79,14 +78,14 @@ def plan_from_preset(
 
     from agent.plan_guard import should_generate_captions
 
-    if cfg.get("replace_music") or "music" in user_message.lower():
-        music_params = music_action_for_preset(cfg, summary, user_message=user_message)
+    if cfg.get("replace_music"):
+        music_params = music_action_for_preset(cfg, summary)
         if music_params:
             action = music_params.pop("_action", "replace_music")
             tool = "propose_replace_music" if action == "replace_music" else "propose_add_music"
             pending.append(_tool_to_pending(tool, music_params))
 
-    if should_generate_captions(cfg, summary, user_message):
+    if should_generate_captions(cfg, summary):
         cap_params: dict = {
             "style": brief.preset_id,
             "max_words_per_line": 4 if brief.preset_id == "tiktok_viral" else 6,
@@ -94,15 +93,6 @@ def plan_from_preset(
         if cfg.get("visible_captions"):
             cap_params["visible_captions"] = True
         pending.append(_tool_to_pending("propose_generate_captions", cap_params))
-
-    if "reorder" in user_message.lower() and len(clips) >= 2:
-        pending.append(_tool_to_pending("propose_reorder_clips", {
-            "segment_id_a": clips[0]["segment_id"],
-            "segment_id_b": clips[-1]["segment_id"],
-        }))
-
-    heuristic = _build_heuristic_plan(user_message, summary, project_path)
-    pending.extend(heuristic)
 
     pending = _dedupe_pending(pending)
 
@@ -123,7 +113,7 @@ def _minimum_preset_actions(
     """When idempotency skips everything, still propose core preset changes."""
     from agent.brain import PendingAction, _tool_to_pending
 
-    cfg = effective_preset_config(brief.preset_id, user_message)
+    cfg = effective_preset_config(brief.preset_id)
     pending: list[PendingAction] = []
     clips = sorted(summary.get("video_clips", []), key=lambda c: c["at_sec"])
 
@@ -133,7 +123,7 @@ def _minimum_preset_actions(
         tool = "propose_replace_music" if action == "replace_music" else "propose_add_music"
         pending.append(_tool_to_pending(tool, music_params))
 
-    if cfg.get("captions") or "caption" in user_message.lower():
+    if cfg.get("captions"):
         cap_params: dict = {
             "style": brief.preset_id,
             "max_words_per_line": 4 if brief.preset_id == "tiktok_viral" else 6,

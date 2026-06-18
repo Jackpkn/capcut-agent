@@ -117,7 +117,15 @@ def describe_action(action: str, params: dict) -> str:
             f'at {params.get("start_sec", 0)}s'
         )
     if action == "add_transition":
-        return f'Add transition "{params.get("query", params.get("name", ""))}" to clip {params.get("segment_id", "")[:8]}…'
+        idx = params.get("clip_index")
+        name = params.get("clip_name")
+        trans = params.get("query", params.get("name", ""))
+        if idx and name:
+            return f'Add transition "{trans}" after clip #{idx} ("{name}")'
+        if idx:
+            return f'Add transition "{trans}" after clip #{idx}'
+        seg = str(params.get("segment_id", ""))[:8]
+        return f'Add transition "{trans}" to clip {seg}…'
     if action == "add_effect":
         return f'Add effect "{params.get("query", params.get("name", ""))}" at {params.get("start_sec", 0)}s'
     if action == "add_sticker":
@@ -257,6 +265,17 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
         return f'Replaced music with "{result["name"]}"{extra}'
 
     if action == "add_transition":
+        from capcut.segment_resolve import resolve_video_segment_id
+
+        video_clips = get_project_summary(project_path).get("video_clips", [])
+        params = dict(params)
+        seg = params.get("segment_id")
+        resolved = resolve_video_segment_id(str(seg or ""), video_clips) if seg else None
+        if not resolved and video_clips:
+            resolved = video_clips[-1]["segment_id"]
+        if not resolved:
+            raise ValueError(f"Video segment not found: {seg}")
+        params["segment_id"] = resolved
         result = add_transition(
             project_path,
             segment_id=params["segment_id"],
@@ -428,7 +447,11 @@ def execute_actions(actions: list[dict], project_path: str) -> list[str]:
         for item in actions:
             action = item["action"]
             params = item.get("params", {})
-            results.append(execute_action(action, params, project_path))
+            try:
+                results.append(execute_action(action, params, project_path))
+            except Exception as e:
+                logger.error(f"Failed to execute action {action}: {e}", exc_info=True)
+                results.append(f"Failed to apply: {e}")
     return results
 
 
@@ -460,15 +483,27 @@ def iter_execute_sse(actions: list[dict], project_path: str):
                         "status": "running",
                         "label": f"[{i}/{len(actions)}] {desc}",
                     })
-                    msg = execute_action(action, params, project_path)
-                    results.append(msg)
-                    emit({
-                        "type": "step",
-                        "id": f"apply_{i}",
-                        "status": "done",
-                        "label": f"[{i}/{len(actions)}] {desc}",
-                        "detail": msg,
-                    })
+                    try:
+                        msg = execute_action(action, params, project_path)
+                        results.append(msg)
+                        emit({
+                            "type": "step",
+                            "id": f"apply_{i}",
+                            "status": "done",
+                            "label": f"[{i}/{len(actions)}] {desc}",
+                            "detail": msg,
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to execute action {action}: {e}", exc_info=True)
+                        msg = f"Failed to apply: {e}"
+                        results.append(msg)
+                        emit({
+                            "type": "step",
+                            "id": f"apply_{i}",
+                            "status": "error",
+                            "label": f"[{i}/{len(actions)}] {desc} (Failed)",
+                            "detail": str(e),
+                        })
             result_box["results"] = results
         except Exception as e:
             result_box["error"] = str(e)

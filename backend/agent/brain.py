@@ -28,52 +28,35 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an expert AI video editor controlling CapCut projects directly on macOS.
-You think like a professional editor — fast, creative, and precise. The human approves your edits before they run.
+EDIT_SYSTEM_PROMPT = """You are the CapCut **edit agent**. The human approves every change before it runs.
 
-## CapCut data model (important)
-- `text_overlays`: each has `text_id` (for editing content), `segment_id` (for timing/visibility), `content`, `at_sec`, `duration_sec`
-- `video_clips`: each has `segment_id` (for speed/volume/trim/move), `name`, `at_sec`, `duration_sec`
-- `audio_clips`: segment_id, volume, timing
-- `text_id` edits the words. `segment_id` edits timeline placement, speed, volume, trim, visibility.
-- Some projects use text templates — always use `text_id` from text_overlays for text edits.
+## Workflow (every edit request)
+1. Read WORKING SLICE / timeline data in the message — use exact segment_id and text_id values.
+2. Call **propose_*** tool(s) for each change. Same turn as your short reply.
+3. Never write pseudo-code, `<tool_code>`, or claim edits are already applied.
 
-## Agent behavior (you decide — no scripts)
-- Infer intent from the human message in **any language**. You are the agent: observe project data → decide whether to **answer** or **propose edits**.
-- **Questions / inspection** (what is on the timeline, captions, clips, duration, capabilities, advice): answer using ONLY ACTIVE PROJECT data. Do **not** call propose_* tools. Format clearly (tables for lists).
-- **Edit requests** (add, change, remove, speed up, music, transitions, captions, mood): call propose_* tools for every change needed. Batch when useful.
-- **Mixed** (e.g. "what captions do I have and make them shorter"): answer first in your message, then propose edits.
-- Think like a pro editor when they want edits: pacing, hook, music, captions — but only propose when they want changes.
-- NEVER claim edits are done until the human approves.
-- Use exact IDs from project data. Timings: 1 second = 1,000,000 microseconds.
-- For text edits use text_id; for speed/volume/trim use segment_id from video_clips.
-- Use propose_batch_update_texts for bulk caption changes.
-- Use search_library / get_director_picks when you need catalog assets before proposing add_* actions.
-- For AI-generated B-roll: propose_generate_image or propose_generate_video_clip with start_sec on the timeline.
-- For multiple timeline changes (split, delete, mixed edits): use **propose_draft_operations** with an `operations` array instead of many separate propose_* calls.
-- When ANALYSIS REPORT is present, reference it in answers and in edit proposals.
-- In answers and proposals, mention **where** on the timeline (seconds, clip name) when relevant.
-- **Timeline visual (your choice only):** call `present_timeline` when a visual helps answer the question — e.g. "what captions", "show my clips", "where will this edit go", "scan this project", audio levels. Do **not** call it for every message. Plain text/tables are enough when the user only wants facts.
-  - User asks **show captions on timeline** / **IN VISUAL** → `present_timeline(view=captions)` same turn.
-  - User asks **scan** / **analyze project** / health → `present_timeline(view=full_scan)` when analysis exists, else `view=captions` or `view=clips` as appropriate.
-  - `view=clips` — clip order and positions
-  - `view=captions` — text overlays on the timeline
-  - `view=audio` — waveform / levels (if analyzed)
-  - `view=edits` — pass `markers` with `at_sec` and `label` for proposed placements
-  - `view=full_scan` — only when user asks for analysis/health scan
-- When the user asks for a **visual** / **show on timeline** / **IN VISUAL**: call `present_timeline` in the same turn. **Never** write `<tool_code>`, `print(present_timeline(...))`, or pseudo-code — only real tool calls work.
+## Tool guide
+| Request | Tool |
+|---------|------|
+| Add transition (incl. end of video) | propose_add_transition — copy **segment_id** exactly from video_clips (UUID). Never use clip_1 / clip_12 labels. End → **last** video_clips entry. |
+| Change caption text | propose_update_text / propose_batch_update_texts |
+| Music | propose_add_music / propose_replace_music |
+| Speed | propose_update_clip_speed |
+| Timeline visual | present_timeline |
 
-## Response format (UI renders structured blocks)
-- Use `## Section title` for main sections.
-- Use `**Label:** value` lines for metadata (Platform, Clips, Duration, etc.).
-- For timeline listings use a markdown table with header row, e.g. `| # | name | at_sec | content |`.
-- Use bullet lists for capabilities and numbered lists for step-by-step plans.
-- Keep paragraphs short; separate sections with blank lines."""
+## Rules
+- EDIT LEDGER = past approvals — still propose if they ask again; check live data.
+- **End of video** → last entry in video_clips (by at_sec).
+- Skip no-ops (transition already on that cut, speed unchanged).
+- Short reply (1–3 sentences) + tools."""
+
+SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT
 
 ANSWER_SYSTEM_PROMPT = """You are the CapCut AI assistant — friendly, concise, and expert.
 The human may greet you, ask about their project, or want advice. **Do not propose edits** — they only asked to chat or inspect.
 
 For **hi / hello / thanks**: reply in 1–2 short sentences only. Do NOT write a CapCut plan, analysis, or numbered steps.
+For **analyze / review / suggest improvements / feedback**: give expert advice using ONLY ACTIVE PROJECT data. Do not invent music, voiceover, or clips that are not in the project. No tools — plain text/markdown only.
 For other questions: use ACTIVE PROJECT data in the conversation. Mention 1–2 real facts when helpful (clip count, duration).
 Keep replies short (2–4 sentences) unless they asked for detail. No tools — plain text/markdown only."""
 
@@ -352,7 +335,10 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "segment_id": {"type": "string", "description": "Video clip segment_id to attach transition"},
+                    "segment_id": {
+                        "type": "string",
+                        "description": "Exact segment_id UUID from video_clips in project data — not clip_1 or clip_12",
+                    },
                     "query": {"type": "string"},
                     "resource_id": {"type": "string"},
                     "duration_sec": {"type": "number"},
@@ -569,6 +555,7 @@ PROPOSE_TO_ACTION = {
 IMMEDIATE_TOOLS = {"search_library", "get_director_picks", "present_timeline"}
 
 MAX_CHAT_TURNS = 6
+MAX_HISTORY_TURNS = 10
 
 SYNTHESIS_NUDGE = (
     "Using the catalog results and project segment_ids above, call propose_* tools now "
@@ -576,21 +563,23 @@ SYNTHESIS_NUDGE = (
     "do not call search_library or get_director_picks again."
 )
 
-VISUAL_NUDGE = (
-    "The user asked for a timeline visual. Call present_timeline now with the right view "
-    "(e.g. captions). Do not write tool_code or print() — only the present_timeline tool renders the UI."
-)
-
-_FAKE_TOOL_MARKERS = ("<tool_code>", "print(present_timeline", "present_timeline(view=")
-
-
-def _reply_looks_like_fake_tool(text: str) -> bool:
-    lower = text.lower()
-    return any(m.lower() in lower for m in _FAKE_TOOL_MARKERS)
-
 conversation_history: list[dict] = []
+_last_project_path: str | None = None
 analysis_context: dict | None = None
 clip_intelligence_context: list[dict] = []
+
+
+def clear_conversation() -> None:
+    """Reset conversation history — call on project switch or new session."""
+    global conversation_history
+    conversation_history = []
+
+
+def _trim_history() -> None:
+    """Keep only the last MAX_HISTORY_TURNS pairs to prevent unbounded growth."""
+    global conversation_history
+    if len(conversation_history) > MAX_HISTORY_TURNS * 2:
+        conversation_history = conversation_history[-(MAX_HISTORY_TURNS * 2):]
 
 
 def set_analysis_context(analysis: dict | None):
@@ -726,6 +715,12 @@ def _collect_from_response(response) -> tuple[str, list[PendingAction], list[dic
                     reply_parts.append(content.text)
 
     reply = "\n".join(reply_parts).strip() or (response.output_text or "").strip()
+    if not reply:
+        thinking_text = getattr(response, "thinking_text", "") or ""
+        if thinking_text:
+            from agent.runtime.ollama_provider import extract_visible_reply_from_thinking
+
+            reply = extract_visible_reply_from_thinking(thinking_text) or ""
     return reply, pending, immediate_calls
 
 
@@ -734,6 +729,30 @@ def _pending_from_suggestions(actions: list[dict]) -> list[PendingAction]:
         PendingAction(action=a["action"], params=a["params"], description=a["description"])
         for a in actions
     ]
+
+
+def _normalize_pending_list(
+    pending: list[PendingAction],
+    summary: dict | None,
+) -> list[PendingAction]:
+    from agent.actions import describe_action
+    from capcut.segment_resolve import normalize_pending_params
+
+    clips = (summary or {}).get("video_clips", [])
+    out: list[PendingAction] = []
+    for item in pending:
+        params = normalize_pending_params(item.action, item.params, clips)
+        if params is None:
+            logger.warning("Dropped invalid segment_id for %s: %s", item.action, item.params)
+            continue
+        if params != item.params:
+            item = PendingAction(
+                action=item.action,
+                params=params,
+                description=describe_action(item.action, params),
+            )
+        out.append(item)
+    return out
 
 
 def _dedupe_pending(pending: list[PendingAction]) -> list[PendingAction]:
@@ -775,76 +794,6 @@ def _project_already_has_music(summary: dict, music_name: str = "") -> bool:
         if name and not name.upper().startswith("VID_"):
             return True
     return False
-
-
-def _analysis_audio_actions(summary: dict) -> list[PendingAction]:
-    if not analysis_context or not analysis_context.get("issues"):
-        return []
-    audio_types = {"quiet", "loud", "clipping", "low_volume"}
-    issues = [i for i in analysis_context["issues"] if i.get("type") in audio_types]
-    return _pending_from_suggestions(issues_to_actions(issues, summary))
-
-
-def _quiet_audio_actions(summary: dict, msg: str) -> list[PendingAction]:
-    """Volume boosts from FFmpeg analysis and/or timeline clip levels."""
-    if not any(kw in msg for kw in ("quiet", "fix quiet", "quiet audio", "louder", "volume")):
-        return []
-
-    pending: list[PendingAction] = []
-    if analysis_context:
-        pending.extend(_analysis_audio_actions(summary))
-
-    seen: set[str] = {
-        p.params.get("segment_id", "")
-        for p in pending
-        if p.action == "update_volume"
-    }
-
-    for clip in summary.get("video_clips", []):
-        seg_id = clip["segment_id"]
-        if seg_id in seen:
-            continue
-        vol = clip.get("volume", 1.0)
-        if vol < 1.0:
-            new_vol = min(1.0, round(vol + 0.3, 2)) if vol < 0.75 else 1.0
-            pending.append(_tool_to_pending("propose_update_volume", {
-                "segment_id": seg_id,
-                "volume": new_vol,
-            }))
-            seen.add(seg_id)
-
-    if ("fix quiet" in msg or "quiet audio" in msg) and not any(
-        p.action == "update_volume" for p in pending
-    ):
-        for clip in summary.get("video_clips", []):
-            seg_id = clip["segment_id"]
-            if seg_id in seen:
-                continue
-            vol = clip.get("volume", 1.0)
-            if vol < 1.0:
-                pending.append(_tool_to_pending("propose_update_volume", {
-                    "segment_id": seg_id,
-                    "volume": 1.0,
-                }))
-                seen.add(seg_id)
-
-    return pending
-
-
-def _analysis_pacing_actions(summary: dict) -> list[PendingAction]:
-    if not analysis_context or not analysis_context.get("issues"):
-        return []
-    pacing_types = {"long_clip"}
-    issues = [i for i in analysis_context["issues"] if i.get("type") in pacing_types]
-    return _pending_from_suggestions(issues_to_actions(issues, summary))
-
-
-def _detect_mood(message: str) -> str:
-    lower = message.lower()
-    for mood in ("energetic", "calm", "dramatic", "fun"):
-        if mood in lower:
-            return mood
-    return "energetic"
 
 
 def _empty_timeline_reply() -> str:
@@ -907,145 +856,40 @@ def _format_timeline_summary_reply(summary: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_heuristic_plan(
-    user_message: str,
-    summary: dict,
-    project_path: str | None = None,
-) -> list[PendingAction]:
-    """Fallback when the model returns no proposals after tool calls / rate limits."""
-    clips = summary.get("video_clips", [])
-    if not clips:
-        return []
-
-    pending: list[PendingAction] = []
-    msg = user_message.lower()
-    sorted_clips = sorted(clips, key=lambda c: c["at_sec"])
-    has_transitions = (
-        _segment_ids_with_transitions(project_path)
-        if project_path
-        else set()
-    )
-
-    if "reorder" in msg and len(sorted_clips) >= 2:
-        pending.append(_tool_to_pending("propose_reorder_clips", {
-            "segment_id_a": sorted_clips[0]["segment_id"],
-            "segment_id_b": sorted_clips[-1]["segment_id"],
-        }))
-
-    if "1.2" in msg or "speed" in msg:
-        target_nums: set[int] = set()
-        if "clips 2" in msg or "clips 2–3" in msg or "clips 2-3" in msg:
-            target_nums = {2, 3}
-        elif "clip 2" in msg:
-            target_nums = {2}
-        speed_val = 1.2
-        for i, clip in enumerate(sorted_clips, start=1):
-            if not target_nums or i in target_nums:
-                pending.append(_tool_to_pending("propose_update_clip_speed", {
-                    "segment_id": clip["segment_id"],
-                    "speed": speed_val,
-                }))
-
-    pending.extend(_quiet_audio_actions(summary, msg))
-
-    if analysis_context and ("energetic" in msg or "pacing" in msg or "trim" in msg):
-        pending.extend(_analysis_pacing_actions(summary))
-
-    if "transition" in msg or "pull" in msg or any(
-        kw in msg for kw in ("better", "improve", "make it", "make this", "anything")
-    ):
-        pull_hits = search_catalog("pull in", "transition", limit=1)
-        query = pull_hits[0]["name"] if pull_hits else "Pull in"
-        resource_id = pull_hits[0]["resource_id"] if pull_hits else None
-        gaps = [
-            clip for clip in sorted_clips[:-1]
-            if clip["segment_id"] not in has_transitions
-        ]
-        if not gaps and sorted_clips[:-1]:
-            gaps = sorted_clips[:-1][:1]
-        for clip in gaps:
-            params: dict = {
-                "segment_id": clip["segment_id"],
-                "query": query,
-                "duration_sec": 0.5,
-            }
-            if resource_id:
-                params["resource_id"] = resource_id
-            pending.append(_tool_to_pending("propose_add_transition", params))
-
-    if any(kw in msg for kw in ("music", "hype", "replace")):
-        music_hits = (
-            search_catalog("adrenaline", "music", limit=1)
-            or search_catalog("action", "music", limit=1)
-            or search_catalog("intense", "music", limit=1)
-        )
-        if music_hits:
-            music_name = music_hits[0]["name"]
-            music_params = {
-                "query": music_name,
-                "start_sec": 0,
-                "volume": 0.65,
-            }
-            if _project_already_has_music(summary, music_name):
-                pass
-            elif _project_already_has_music(summary):
-                pending.append(_tool_to_pending("propose_replace_music", music_params))
-            else:
-                pending.append(_tool_to_pending("propose_add_music", music_params))
-
-    return _dedupe_pending(pending)
-
-
 NO_PROJECT_PROMPT = """You are the CapCut AI assistant.
 The user has NOT selected a CapCut project in the sidebar.
 Tell them clearly: pick their project from the dropdown first — timeline questions, visuals, and edits all need project data.
 Do NOT invent captions, clips, or timeline visuals. Do NOT output tool_code, present_timeline, or fake code."""
 
 
-def _is_simple_greeting(message: str) -> bool:
-    m = message.strip().lower().rstrip("!?.")
-    if m in ("hi", "hello", "hey", "yo", "sup", "thanks", "thank you", "hi there", "hello there"):
-        return True
-    if len(m) > 20:
-        return False
-    edit_words = ("edit", "caption", "music", "transition", "video", "clip", "timeline", "make", "add", "fix", "blog")
-    return not any(w in m for w in edit_words)
+_EMPTY_REPLY_NUDGE = (
+    "Your previous response had no user-visible text. "
+    "Reply to the user in one or two short sentences. No meta commentary or thinking labels."
+)
 
-
-def _looks_like_edit_request(message: str) -> bool:
-    m = message.lower()
-    markers = (
-        "transition", "music", "caption", "effect", "trim", "speed",
-        "add ", "remove", "change", "make it", "make this", "better",
-        "improve", "reorder", "sticker", "image", "anything",
+def _edit_retry_nudge(user_message: str) -> str:
+    """Retry text that quotes the human request — never generic protocol text alone."""
+    request = (user_message or "").strip() or "timeline edit"
+    return (
+        f"Execute this edit request now: «{request}»\n"
+        "Call the matching propose_* tool(s) using segment_ids from WORKING SLICE. "
+        "Do not ask the human to repeat themselves. "
+        "EDIT LEDGER is history — use live timeline data."
     )
-    return any(w in m for w in markers)
 
 
-def _looks_like_thinking_leak(text: str) -> bool:
-    t = text.lower()
-    if len(text) > 350:
-        return True
-    leak_markers = (
-        "thinking process", "analyze the request", "clip intelligence",
-        "evaluate the existing", "**goal:**", "numbered list",
-    )
-    return any(m in t for m in leak_markers)
-
-
-def _run_streaming_chat(
+def _collect_streamed_reply(
     input_items: list[dict],
     emit: EventEmitter | None,
     *,
-    instructions: str = NO_PROJECT_PROMPT,
-    max_output_tokens: int = 512,
-    agent: str = "chat",
+    instructions: str,
+    max_output_tokens: int,
+    agent: str,
     think: bool | None = None,
-) -> ChatResult:
-    """Stream a chat reply (no tools)."""
+) -> tuple[str, str]:
+    """Stream one chat turn; returns (visible_reply, thinking_text)."""
     from agent.runtime.model import stream_model_text
 
-    emit_step(emit, "model", "Composing reply…")
     thinking_started = False
     thinking_parts: list[str] = []
     parts: list[str] = []
@@ -1079,17 +923,49 @@ def _run_streaming_chat(
     if not reply and thinking:
         from agent.runtime.ollama_provider import extract_visible_reply_from_thinking
 
-        candidate = extract_visible_reply_from_thinking(thinking)
-        if candidate and not _looks_like_thinking_leak(candidate):
-            reply = candidate
-    if not reply or _looks_like_thinking_leak(reply):
-        reply = "Hi! How can I help with your CapCut project?"
+        reply = extract_visible_reply_from_thinking(thinking) or ""
     if not parts and reply and not answer_started:
-        if not answer_started:
-            response_start(emit)
+        response_start(emit)
         from agent.streaming import emit_text_chunks
 
         emit_text_chunks(emit, reply, chunk_chars=10)
+    return reply, thinking
+
+
+def _run_streaming_chat(
+    input_items: list[dict],
+    emit: EventEmitter | None,
+    *,
+    instructions: str = NO_PROJECT_PROMPT,
+    max_output_tokens: int = 512,
+    agent: str = "chat",
+    think: bool | None = None,
+) -> ChatResult:
+    """Stream a chat reply (no tools)."""
+    emit_step(emit, "model", "Composing reply…")
+    reply, thinking = _collect_streamed_reply(
+        input_items,
+        emit,
+        instructions=instructions,
+        max_output_tokens=max_output_tokens,
+        agent=agent,
+        think=think,
+    )
+    if not reply.strip():
+        emit_step(emit, "model", "Empty reply — retrying…")
+        retry_items = [*input_items, {"role": "user", "content": _EMPTY_REPLY_NUDGE}]
+        retry_reply, retry_thinking = _collect_streamed_reply(
+            retry_items,
+            emit,
+            instructions=instructions,
+            max_output_tokens=max_output_tokens,
+            agent=agent,
+            think=think,
+        )
+        if retry_reply.strip():
+            reply = retry_reply
+        if retry_thinking:
+            thinking = f"{thinking}\n\n{retry_thinking}".strip() if thinking else retry_thinking
     emit_step(emit, "model", "Reply complete", "done")
     conversation_history.append({"role": "assistant", "content": reply})
     return ChatResult(reply=reply, pending_actions=[], thinking=thinking)
@@ -1133,107 +1009,63 @@ def hydrate_analysis_from_cache(project_path: str | None) -> None:
             set_clip_intelligence_context(cached["clip_intelligence"])
 
 
-def _maybe_run_audio_analysis(
-    user_message: str,
-    project_path: str,
-    emit: EventEmitter | None,
-    *,
-    run_if_missing: bool = True,
-) -> None:
-    from analysis.analyzer import analyze_project
-    from analysis.cache import get_cached, message_needs_audio_analysis, set_cached
-
-    if not message_needs_audio_analysis(user_message):
-        hydrate_analysis_from_cache(project_path)
-        return
-
-    cached = get_cached(project_path)
-    if cached:
-        set_analysis_context({
-            "score": cached["score"],
-            "issues": cached["issues"],
-            "clips_analyzed": cached["clips_analyzed"],
-        })
-        emit_step(
-            emit, "ffmpeg",
-            f"Using cached audio analysis (score {cached['score']}/100)",
-            "done",
-        )
-        return
-
-    if not run_if_missing:
-        emit_step(
-            emit, "ffmpeg",
-            "Skipping live FFmpeg scan (use Analyze panel for deep quiet detection)",
-            "done",
-        )
-        return
-
-    emit_step(emit, "ffmpeg", "Analyzing clip audio (FFmpeg)…")
-    try:
-        analysis = analyze_project(project_path, max_clips=4)
-        set_cached(project_path, analysis)
-        set_analysis_context({
-            "score": analysis["score"],
-            "issues": analysis["issues"],
-            "clips_analyzed": analysis["clips_analyzed"],
-        })
-        emit_step(
-            emit, "ffmpeg",
-            f"Audio analysis ready — score {analysis['score']}/100",
-            "done",
-            f"{analysis['clips_analyzed']} clip(s) scanned",
-        )
-    except Exception as e:
-        logger.warning("Auto audio analysis failed: %s", e)
-        emit_step(emit, "ffmpeg", "Audio analysis skipped", "error", str(e))
-
-
 def stream_agent_events(
     user_message: str,
     project_path: str | None = None,
     emit: EventEmitter | None = None,
     *,
     answer_only: bool = False,
+    project_summary: dict | None = None,
 ) -> ChatResult:
     """Run the agent loop; emit step/tool events in real time when emit is provided."""
+    global _last_project_path
     from core.retrieve_context import retrieve_context
+
+    # Reset conversation when project changes to avoid stale segment IDs
+    if project_path != _last_project_path:
+        clear_conversation()
+        _last_project_path = project_path
+
+    _trim_history()
 
     context = ""
     summary: dict | None = None
     timeline_compact: dict | None = None
     if project_path:
-        emit_step(emit, "load_project", "Reading CapCut timeline from disk…")
         try:
-            summary = get_project_summary(project_path)
+            if project_summary is not None:
+                summary = project_summary
+                emit_step(emit, "load_project", "Using preloaded timeline", "done")
+            else:
+                emit_step(emit, "load_project", "Reading CapCut timeline from disk…")
+                summary = get_project_summary(project_path)
             overview = summary.get("overview", {})
             clip_count = overview.get("video_clip_count", 0)
-            emit_step(
-                emit, "load_project", "Timeline loaded", "done",
-                f"{clip_count} video clip(s), {overview.get('transition_count', 0)} transition(s)",
-            )
-            if _is_simple_greeting(user_message):
-                dur = overview.get("duration_sec") or overview.get("total_duration_sec") or 0
-                context = (
-                    f"\n\nPROJECT (brief): {clip_count} clip(s), "
-                    f"{float(dur):.1f}s — user sent a short greeting."
-                )
-                emit_step(emit, "retrieve", "Greeting — light context", "done")
-            else:
-                retrieved = retrieve_context(
-                    project_path,
-                    user_message,
-                    analysis=analysis_context,
-                )
+            if project_summary is None:
                 emit_step(
-                    emit, "retrieve",
-                    "Loaded timeline slice", "done",
-                    ", ".join(retrieved.domains) + (
-                        f" — {retrieved.retrieval_notes[0]}" if retrieved.retrieval_notes else ""
-                    ),
+                    emit, "load_project", "Timeline loaded", "done",
+                    f"{clip_count} video clip(s), {overview.get('transition_count', 0)} transition(s)",
                 )
-                context = f"\n\n{retrieved.to_prompt_block()}"
-                timeline_compact = retrieved.catalog
+            else:
+                emit_step(
+                    emit, "load_project", "Timeline ready", "done",
+                    f"{clip_count} video clip(s), {overview.get('transition_count', 0)} transition(s)",
+                )
+            retrieved = retrieve_context(
+                project_path,
+                user_message,
+                analysis=analysis_context,
+                project_summary=summary,
+            )
+            emit_step(
+                emit, "retrieve",
+                "Loaded timeline slice", "done",
+                ", ".join(retrieved.domains) + (
+                    f" — {retrieved.retrieval_notes[0]}" if retrieved.retrieval_notes else ""
+                ),
+            )
+            context = f"\n\n{retrieved.to_prompt_block()}"
+            timeline_compact = retrieved.catalog
             if clip_count == 0:
                 context += (
                     "\n\nNOTE: Timeline shows 0 video clips on disk. "
@@ -1254,12 +1086,11 @@ def stream_agent_events(
 
     if answer_only:
         input_items = [{"role": m["role"], "content": m["content"]} for m in conversation_history]
-        simple = _is_simple_greeting(user_message)
         return _run_streaming_chat(
             input_items,
             emit,
             instructions=ANSWER_SYSTEM_PROMPT,
-            max_output_tokens=256 if simple else 384,
+            max_output_tokens=384,
             agent="chat",
         )
 
@@ -1272,7 +1103,6 @@ def stream_agent_events(
     pending: list[PendingAction] = []
     reply_parts: list[str] = []
     thinking_parts: list[str] = []
-    nudged = False
     llm_failed = False
 
     for turn in range(MAX_CHAT_TURNS):
@@ -1280,11 +1110,11 @@ def stream_agent_events(
         from agent.runtime.model import call_model
 
         response = call_model(
-            instructions=SYSTEM_PROMPT,
+            instructions=EDIT_SYSTEM_PROMPT,
             input_items=input_items,
             tools=tools,
-            temperature=0.5,
-            max_output_tokens=1536,
+            temperature=0.3,
+            max_output_tokens=1024,
             agent="chat",
             emit=emit,
         )
@@ -1294,30 +1124,26 @@ def stream_agent_events(
             break
 
         step_reply, step_pending, immediate_calls = _collect_from_response(response)
+        has_proposal = bool(step_pending or immediate_calls)
 
-        if (
-            not immediate_calls
-            and not step_pending
-            and step_reply
-            and _reply_looks_like_fake_tool(step_reply)
-            and turn + 1 < MAX_CHAT_TURNS
-        ):
-            emit_step(emit, f"model_{turn}", "Requesting real timeline visual…", "done")
+        if not has_proposal and turn + 1 < MAX_CHAT_TURNS:
+            emit_step(emit, f"model_{turn}", "No proposal yet — retrying…", "done")
             _append_response_to_input(input_items, response)
-            input_items.append({"role": "user", "content": VISUAL_NUDGE})
+            input_items.append({"role": "user", "content": _edit_retry_nudge(user_message)})
             continue
 
         if step_reply:
             reply_parts.append(step_reply)
         from agent.timeline_anchor import describe_timeline_target
 
-        for item in step_pending:
+        normalized_step = _normalize_pending_list(step_pending, summary)
+        for item in normalized_step:
             anchor = describe_timeline_target(item.action, item.params, summary)
             emit_proposal(
                 emit, item.description, item.action,
                 anchor=anchor or None, agent="Edit Agent",
             )
-        pending.extend(step_pending)
+        pending.extend(normalized_step)
 
         if immediate_calls:
             emit_step(emit, f"model_{turn}", "Running catalog tools…", "done")
@@ -1357,19 +1183,47 @@ def stream_agent_events(
         )
         emit_step(emit, "model", "Model unavailable", "error")
 
+    pending = _normalize_pending_list(pending, summary)
     pending = _dedupe_pending(pending)
 
-    if not pending and summary and _looks_like_edit_request(user_message):
-        pending = _build_heuristic_plan(user_message, summary, project_path)
-        if pending and emit:
-            from agent.timeline_anchor import describe_timeline_target
+    # Only attempt a final retry if the main loop used few turns (≤2),
+    # otherwise we already retried enough and would just burn rate limits.
+    if not pending and not llm_failed and turn <= 2:
+        from agent.runtime.model import call_model
+        from agent.timeline_anchor import describe_timeline_target
 
-            for item in pending:
-                anchor = describe_timeline_target(item.action, item.params, summary)
-                emit_proposal(
-                    emit, item.description, item.action,
-                    anchor=anchor or None, agent="Edit Agent",
-                )
+        emit_step(emit, "model", "No proposal — final tool attempt…")
+        retry_response = call_model(
+            instructions=EDIT_SYSTEM_PROMPT,
+            input_items=[
+                *input_items,
+                {"role": "user", "content": _edit_retry_nudge(user_message)},
+            ],
+            tools=tools,
+            temperature=0.3,
+            max_output_tokens=1024,
+            agent="chat",
+            emit=emit,
+        )
+        if retry_response is not None:
+            retry_reply, retry_pending, _ = _collect_from_response(retry_response)
+            if retry_pending:
+                for item in retry_pending:
+                    anchor = describe_timeline_target(item.action, item.params, summary)
+                    emit_proposal(
+                        emit, item.description, item.action,
+                        anchor=anchor or None, agent="Edit Agent",
+                    )
+                pending.extend(retry_pending)
+            if retry_reply.strip():
+                reply = retry_reply
+
+    pending = _normalize_pending_list(pending, summary)
+    pending = _dedupe_pending(pending)
+    if project_path and pending:
+        from agent.plan_guard import collapse_redundant_pending
+
+        pending = collapse_redundant_pending(pending, summary or {}, project_path)
 
     if pending:
         plan = "\n".join(f"  • {a.description}" for a in pending)
@@ -1381,24 +1235,6 @@ def stream_agent_events(
                 "Review the amber **Approve** bar when you're ready."
             )
 
-    if not reply and analysis_context and summary:
-        score = analysis_context.get("score", "?")
-        fixes = issues_to_actions(analysis_context.get("issues", []), summary)
-        fix_lines = "\n".join(f"  • {f['description']}" for f in fixes[:6])
-        reply = (
-            f"Your FFmpeg analysis scored **{score}/100**. "
-            "Describe an edit (e.g. \"make it energetic\") or say **apply analysis fixes**.\n\n"
-            f"**Available auto-fixes:**\n{fix_lines}"
-        )
-
-    if not reply:
-        if _looks_like_edit_request(user_message):
-            reply = (
-                "I understood your edit request but couldn't queue changes this time. "
-                "Try: **add pull-in transitions between clips** or enable **Force team** for a full pass."
-            )
-        else:
-            reply = "How can I help with your CapCut project?"
     conversation_history.append({"role": "assistant", "content": reply})
     return ChatResult(
         reply=reply,
@@ -1416,6 +1252,7 @@ def iter_agent_sse(
     project_path: str | None = None,
     *,
     answer_only: bool = False,
+    project_summary: dict | None = None,
 ):
     """Yield SSE lines while the agent runs (threaded producer)."""
     import queue
@@ -1439,6 +1276,7 @@ def iter_agent_sse(
                 project_path,
                 emit=emit,
                 answer_only=answer_only,
+                project_summary=project_summary,
             )
         except Exception as e:
             logger.exception("Agent stream error")

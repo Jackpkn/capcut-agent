@@ -171,6 +171,20 @@ def run_agent(
                 emit({"type": "agent_message", "agent": config.name, "content": step_reply})
 
         if not calls:
+            if (
+                config.stop_on_proposals
+                and turn + 1 < config.max_turns
+            ):
+                _append_response_to_input(input_items, response)
+                input_items.append({
+                    "role": "user",
+                    "content": (
+                        "Call propose_* tools now for the human's edit request in context. "
+                        "Plain text without tools is not enough."
+                    ),
+                })
+                emit_step(emit, f"{agent_slug}_turn_{turn}", "No tools — retrying…", "done")
+                continue
             emit_step(emit, f"{agent_slug}_turn_{turn}", "Response complete", "done")
             break
 

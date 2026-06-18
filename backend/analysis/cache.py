@@ -11,8 +11,3 @@ def get_cached(project_path: str) -> dict | None:
 
 def set_cached(project_path: str, analysis: dict) -> None:
     _cache[project_path] = analysis
-
-
-def message_needs_audio_analysis(message: str) -> bool:
-    lower = message.lower()
-    return any(k in lower for k in ("quiet", "fix quiet", "quiet audio", "louder"))

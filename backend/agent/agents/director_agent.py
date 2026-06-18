@@ -64,15 +64,13 @@ def run_llm_director(
     markdown = submit.get("brief_markdown") or ""
 
     if intent == "answer" and not auto_edit:
-        brief = build_edit_brief(user_message, timeline_summary, "custom")
+        brief = build_edit_brief(timeline_summary, "custom")
         return DirectorResult(
             brief=brief, markdown=markdown, goals=[], answer_only=True,
         )
 
     preset_hint = submit.get("preset_hint") or "custom"
-    if preset_hint == "custom" and "blog" in user_message.lower():
-        preset_hint = "blog"
-    brief = build_edit_brief(user_message, timeline_summary, preset_hint)
+    brief = build_edit_brief(timeline_summary, preset_hint)
 
     memory = SessionMemory()
     memory.apply_brief(brief.to_dict())

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { RichAgentContent } from "./RichAgentContent";
 import { EditorTimelineReport, type EditorTimelinePayload } from "./EditorTimelineReport";
 
@@ -11,60 +11,91 @@ export type AgentStep = {
   detail?: string;
 };
 
-function ThinkingPanel({
+function DotLoader({ className = "" }: { className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 ${className}`} aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="h-1 w-1 rounded-full bg-white/45 animate-bounce"
+          style={{ animationDelay: `${i * 0.14}s` }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function LightbulbIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      className={`shrink-0 ${className}`}
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M9 18h6" />
+      <path d="M10 22h4" />
+      <path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z" />
+    </svg>
+  );
+}
+
+function ThinkingLine({
   thinking,
   streaming,
-  agent,
+  thinkingSeconds,
 }: {
   thinking?: string;
   streaming?: boolean;
-  agent?: string;
+  thinkingSeconds?: number;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
+  const [prevStreaming, setPrevStreaming] = useState(streaming);
+  const hasThinking = Boolean(thinking?.trim());
 
-  useEffect(() => {
-    if (streaming || thinking) setOpen(true);
-  }, [streaming, thinking]);
+  if (streaming !== prevStreaming) {
+    setPrevStreaming(streaming);
+    if (streaming) {
+      setOpen(false);
+    }
+  }
 
-  if (!thinking && !streaming) return null;
+  if (!streaming && !hasThinking) return null;
+
+  const label = streaming
+    ? "Thinking"
+    : thinkingSeconds != null && thinkingSeconds > 0
+      ? `Thought for ${thinkingSeconds.toFixed(1)} seconds`
+      : "Thought";
 
   return (
-    <div className="mb-3 rounded-xl border-2 border-violet-400/60 bg-violet-500/15 overflow-hidden shadow-[0_0_32px_rgba(139,92,246,0.18)]">
+    <div className="mb-2">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-violet-500/[0.05] transition-colors cursor-pointer"
+        onClick={() => hasThinking && setOpen((v) => !v)}
+        className={`flex items-center gap-2 text-[13px] text-white/45 transition-colors ${
+          hasThinking ? "hover:text-white/60 cursor-pointer" : "cursor-default"
+        }`}
+        disabled={!hasThinking}
       >
-        <span
-          className={`h-2.5 w-2.5 rounded-full shrink-0 ${
-            streaming
-              ? "bg-violet-400 animate-pulse shadow-[0_0_8px_rgba(167,139,250,0.45)]"
-              : "bg-violet-400/80"
-          }`}
-        />
-        <div className="flex-1 min-w-0">
-          <p className="text-[10px] uppercase tracking-wider font-semibold text-violet-200/80">
-            {streaming ? "Model thinking…" : "Model thinking"}
-            {agent ? ` — ${agent}` : ""}
-          </p>
-          <p className="text-[11px] text-violet-200/40 truncate">
-            {thinking ? `${thinking.length} chars` : "Waiting for reasoning trace…"}
-          </p>
-        </div>
-        <span className="text-violet-200/35 text-xs shrink-0">{open ? "▾" : "▸"}</span>
+        <LightbulbIcon />
+        <span>{label}</span>
+        {streaming && <DotLoader />}
+        {hasThinking && (
+          <span className="text-white/25 text-[10px] ml-0.5">{open ? "▾" : "▸"}</span>
+        )}
       </button>
-      {open && (
-        <div className="border-t border-violet-500/20 px-3.5 py-3 max-h-72 overflow-y-auto">
-          {thinking ? (
-            <pre className="text-[11px] leading-relaxed text-violet-100/75 whitespace-pre-wrap font-sans">
-              {thinking}
-              {streaming && (
-                <span className="inline-block w-0.5 h-3.5 ml-0.5 bg-violet-300 animate-pulse align-middle rounded-full" />
-              )}
-            </pre>
-          ) : (
-            <p className="text-[11px] text-violet-200/45 animate-pulse">Reasoning…</p>
-          )}
+      {open && hasThinking && (
+        <div className="mt-2 pl-5 pr-1 max-h-48 overflow-y-auto">
+          <pre className="text-[11px] leading-relaxed text-white/40 whitespace-pre-wrap font-sans">
+            {thinking}
+          </pre>
         </div>
       )}
     </div>
@@ -72,7 +103,7 @@ function ThinkingPanel({
 }
 
 function TracePanel({ steps, streaming }: { steps: AgentStep[]; streaming?: boolean }) {
-  const [open, setOpen] = useState(streaming ?? false);
+  const [open, setOpen] = useState(false);
   const running = steps.some((s) => s.status === "running");
   const doneCount = steps.filter((s) => s.status === "done").length;
   const errCount = steps.filter((s) => s.status === "error").length;
@@ -87,55 +118,37 @@ function TracePanel({ steps, streaming }: { steps: AgentStep[]; streaming?: bool
   }, {});
 
   return (
-    <div className="mb-3 rounded-xl border border-white/[0.07] bg-black/30 overflow-hidden">
+    <div className="mb-2 rounded-lg border border-white/[0.06] bg-black/20 overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-white/[0.03] transition-colors cursor-pointer"
+        className="w-full flex items-center gap-2 px-2.5 py-2 text-left hover:bg-white/[0.03] transition-colors cursor-pointer"
       >
         <span
-          className={`h-2.5 w-2.5 rounded-full shrink-0 ${
-            running || streaming ? "bg-capcut animate-pulse shadow-[0_0_8px_rgba(0,203,214,0.5)]" : errCount ? "bg-rose-400" : "bg-emerald-400"
+          className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+            running || streaming ? "bg-capcut animate-pulse" : errCount ? "bg-rose-400" : "bg-emerald-400/80"
           }`}
         />
-        <div className="flex-1 min-w-0">
-          <p className="text-[10px] uppercase tracking-wider font-semibold text-white/55">
-            {streaming || running ? "Agent working" : "What the agent did"}
-          </p>
-          <p className="text-[11px] text-white/35 truncate">
-            {doneCount} step{doneCount !== 1 ? "s" : ""} completed
-            {errCount > 0 ? ` · ${errCount} issue${errCount !== 1 ? "s" : ""}` : ""}
-          </p>
-        </div>
-        <span className="text-white/30 text-xs shrink-0">{open ? "▾" : "▸"}</span>
+        <p className="text-[10px] text-white/35 flex-1">
+          {streaming || running ? "Working…" : `${doneCount} step${doneCount !== 1 ? "s" : ""}`}
+        </p>
+        <span className="text-white/25 text-[10px]">{open ? "▾" : "▸"}</span>
       </button>
       {open && (
-        <div className="border-t border-white/[0.06] px-2 py-2 max-h-52 overflow-y-auto space-y-2">
+        <div className="border-t border-white/[0.05] px-2 py-2 max-h-40 overflow-y-auto space-y-1.5">
           {Object.entries(grouped).map(([phase, phaseSteps]) => (
             <div key={phase}>
-              <p className="text-[9px] uppercase tracking-wider text-white/30 font-semibold px-2 mb-1">
+              <p className="text-[9px] uppercase tracking-wider text-white/25 font-medium px-1 mb-0.5">
                 {phase.replace(/_/g, " ")}
               </p>
-              <div className="space-y-0.5">
-                {phaseSteps.map((step) => (
-                  <div
-                    key={step.id}
-                    className="flex gap-2.5 items-start text-[11px] rounded-lg px-2 py-1.5 hover:bg-white/[0.02]"
-                  >
-                    <StepIcon status={step.status} />
-                    <div className="min-w-0 flex-1">
-                      <p className={`font-medium leading-snug ${step.status === "error" ? "text-rose-300" : "text-white/80"}`}>
-                        {step.label}
-                      </p>
-                      {step.detail && (
-                        <p className="text-white/35 text-[10px] mt-0.5 leading-relaxed break-words">
-                          {step.detail}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              {phaseSteps.map((step) => (
+                <div key={step.id} className="flex gap-2 items-start text-[10px] px-1 py-0.5">
+                  <StepIcon status={step.status} />
+                  <span className={step.status === "error" ? "text-rose-300/80" : "text-white/55"}>
+                    {step.label}
+                  </span>
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -146,29 +159,20 @@ function TracePanel({ steps, streaming }: { steps: AgentStep[]; streaming?: bool
 
 function StepIcon({ status }: { status: AgentStep["status"] }) {
   if (status === "running") {
-    return (
-      <span className="w-4 h-4 mt-0.5 shrink-0 rounded-full border-2 border-capcut border-t-transparent animate-spin" />
-    );
+    return <DotLoader className="mt-1 shrink-0" />;
   }
   if (status === "error") {
-    return (
-      <span className="w-4 h-4 mt-0.5 shrink-0 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-400 text-[9px] leading-[14px] text-center font-bold">
-        ✕
-      </span>
-    );
+    return <span className="text-rose-400 text-[9px] shrink-0">✕</span>;
   }
-  return (
-    <span className="w-4 h-4 mt-0.5 shrink-0 rounded-full bg-emerald-500/15 border border-emerald-500/25 text-emerald-400 text-[9px] leading-[14px] text-center font-bold">
-      ✓
-    </span>
-  );
+  return <span className="text-emerald-400/70 text-[9px] shrink-0">✓</span>;
 }
 
 export function AssistantMessage({
   content,
   thinking,
   thinkingStreaming,
-  agent: thinkingAgent,
+  thinkingSeconds,
+  agent: _thinkingAgent,
   steps = [],
   proposals = [],
   editorReport,
@@ -178,6 +182,7 @@ export function AssistantMessage({
   content?: string;
   thinking?: string;
   thinkingStreaming?: boolean;
+  thinkingSeconds?: number;
   agent?: string;
   steps?: AgentStep[];
   proposals?: string[];
@@ -185,38 +190,39 @@ export function AssistantMessage({
   streaming?: boolean;
   waiting?: boolean;
 }) {
+  const showInitialDots =
+    streaming && !content && !thinking && !thinkingStreaming && !waiting;
+  const showWaitingDots = waiting && !content && !thinking;
+
   return (
-    <div className="space-y-3 w-full">
+    <div className="space-y-2 w-full">
       {editorReport && <EditorTimelineReport report={editorReport} />}
 
-      <ThinkingPanel
+      {(showInitialDots || showWaitingDots) && (
+        <div className="flex items-center gap-2 py-1 pl-0.5">
+          <DotLoader />
+        </div>
+      )}
+
+      <ThinkingLine
         thinking={thinking}
-        streaming={thinkingStreaming || (streaming && !content)}
-        agent={thinkingAgent}
+        streaming={thinkingStreaming}
+        thinkingSeconds={thinkingSeconds}
       />
 
       <TracePanel steps={steps} streaming={streaming} />
 
-      {(content || streaming || waiting) && (
-        <div className="rounded-xl border border-white/[0.07] bg-gradient-to-b from-white/[0.03] to-transparent px-4 py-3.5 shadow-sm">
-          {content ? (
-            <RichAgentContent text={content} />
-          ) : (
-            <div className="flex items-center gap-2.5 py-2">
-              <span className="h-4 w-4 rounded-full border-2 border-capcut/60 border-t-capcut animate-spin shrink-0" />
-              <p className="text-white/45 text-xs">
-                {waiting ? "Agent is composing a response…" : "Thinking…"}
-              </p>
-            </div>
-          )}
-          {streaming && content && (
-            <span className="inline-block w-0.5 h-4 ml-0.5 bg-capcut animate-pulse align-middle rounded-full" />
+      {content && (
+        <div className="text-[13px] leading-relaxed text-white/90">
+          <RichAgentContent text={content} />
+          {streaming && (
+            <span className="inline-block w-0.5 h-3.5 ml-0.5 bg-white/50 animate-pulse align-middle rounded-full" />
           )}
         </div>
       )}
 
       {proposals.length > 0 && (
-        <div className="rounded-xl border border-capcut/30 bg-capcut/[0.07] overflow-hidden">
+        <div className="rounded-xl border border-capcut/30 bg-capcut/[0.07] overflow-hidden mt-3">
           <div className="px-4 py-2 border-b border-capcut/20 bg-capcut/[0.05]">
             <p className="text-[10px] uppercase tracking-wider font-semibold text-capcut">
               Proposed edits — approve to apply

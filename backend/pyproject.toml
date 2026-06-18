@@ -19,3 +19,4 @@ dependencies = [
 
 [project.optional-dependencies]
 captions = ["openai-whisper>=20231117"]
+dev = ["pytest>=8.0.0"]

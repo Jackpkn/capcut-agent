@@ -75,6 +75,20 @@ def provider_order(explicit: str | None = None) -> list[str]:
     return order
 
 
+def provider_order_for_tools(explicit: str | None = None) -> list[str]:
+    """
+    Provider order when function calling matters.
+    Defaults to preferring Groq over Ollama (Gemma tool-call reliability).
+  """
+    order = provider_order(explicit)
+    if not order:
+        return order
+    preferred = os.environ.get("LLM_TOOLS_PROVIDER", "groq").lower()
+    if preferred in order:
+        return [preferred] + [n for n in order if n != preferred]
+    return order
+
+
 def _get_groq_client() -> OpenAI | None:
     global _groq_client
     if _groq_client is not None:
@@ -384,14 +398,19 @@ def call_model(
     provider: str | None = None,
     agent: str = "",
     emit=None,
+    think: bool | None = None,
 ) -> ModelResponse | None:
     """Call LLM; on rate/token limits try the next configured provider."""
     from agent.runtime.agent_log import agent as log_agent, llm as log_llm
     from agent.runtime.stream_emit import make_chunk_emitter
 
+    # Gemma 4: thinking mode fights tool calls — disable unless caller opts in.
+    if think is None:
+        think = not bool(tools)
+
     on_chunk, finalize = make_chunk_emitter(emit, agent=agent or "")
 
-    order = provider_order(provider)
+    order = provider_order_for_tools(provider) if tools else provider_order(provider)
     if not order:
         log_llm("no provider configured — start Ollama or set API keys")
         return None
@@ -416,6 +435,7 @@ def call_model(
                     max_output_tokens=max_output_tokens,
                     agent=agent,
                     on_chunk=on_chunk,
+                    think=think,
                 )
             elif name == "groq":
                 result = _call_groq(

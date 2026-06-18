@@ -59,6 +59,8 @@ type Message = {
   thinking?: string;
   thinkingStreaming?: boolean;
   thinkingAgent?: string;
+  thinkingStartedAt?: number;
+  thinkingSeconds?: number;
   steps?: AgentStep[];
   proposals?: string[];
   editorReport?: EditorTimelinePayload | null;
@@ -801,6 +803,8 @@ export default function Home() {
       proposals: string[];
       reply: string;
       thinking: string;
+      thinkingStreaming: boolean;
+      thinkingStartedAt: number | null;
       tasks: TeamTask[];
       patchAssistant: (patch: Partial<Message>) => void;
     }
@@ -810,10 +814,11 @@ export default function Home() {
 
     if (type === "model_thinking_start") {
       const agent = event.agent ? String(event.agent) : "model";
-      // New agent turn — reset reasoning buffer (don't wipe on every chunk).
       if (!ctx.thinkingStreaming) {
         ctx.thinking = "";
+        ctx.thinkingStartedAt = Date.now();
       }
+      ctx.thinkingStreaming = true;
       steps = upsertStep(steps, {
         id: "model_thinking",
         label: `Model reasoning — ${agent}`,
@@ -825,6 +830,7 @@ export default function Home() {
           thinking: ctx.thinking,
           thinkingStreaming: true,
           thinkingAgent: agent,
+          thinkingStartedAt: ctx.thinkingStartedAt ?? Date.now(),
           steps: [...steps],
         })
       );
@@ -844,6 +850,11 @@ export default function Home() {
         })
       );
     } else if (type === "model_thinking_end") {
+      const thinkingSeconds =
+        ctx.thinkingStartedAt != null
+          ? (Date.now() - ctx.thinkingStartedAt) / 1000
+          : undefined;
+      ctx.thinkingStreaming = false;
       steps = upsertStep(steps, {
         id: "model_thinking",
         label: steps.find((s) => s.id === "model_thinking")?.label ?? "Model reasoning",
@@ -858,6 +869,7 @@ export default function Home() {
         ctx.patchAssistant({
           thinking: ctx.thinking || undefined,
           thinkingStreaming: false,
+          thinkingSeconds,
           steps: [...steps],
         })
       );
@@ -1042,23 +1054,26 @@ export default function Home() {
       const diff = (event.edit_diff as EditDiff | undefined) ?? null;
       const teamPlan = (event.team_plan as TeamPlanPayload | undefined) ?? undefined;
       setPendingActions(actions);
-      if (diff) setEditDiff(diff);
-      else if (actions.length) void fetchEditPreview(actions);
-        ctx.patchAssistant({
-          content: reply,
-          thinking: finalThinking || ctx.thinking || undefined,
-          teamPlan,
-          steps,
-          proposals: teamPlan ? [] : proposals,
-          streaming: false,
-          thinkingStreaming: false,
-          pendingActions: actions,
-        });
+      if (diff) {
+        setEditDiff(diff);
+      } else if (actions.length) {
+        void fetchEditPreview(actions);
+      }
+      ctx.patchAssistant({
+        content: reply,
+        thinking: finalThinking || ctx.thinking || undefined,
+        teamPlan,
+        steps,
+        proposals: teamPlan ? [] : proposals,
+        streaming: false,
+        thinkingStreaming: false,
+        pendingActions: actions,
+      });
         // keep editorReport on message
       pushAgentLive({
         active: false,
         title: teamPlan
-          ? teamPlan.tasks?.length
+          ? teamPlan.approved_tasks?.length
             ? "Team plan ready — review & approve"
             : "Team finished — no edits queued"
           : actions.length
@@ -1095,7 +1110,7 @@ export default function Home() {
     setMessages((prev) => [
       ...prev,
       { role: "user", content: userDisplay },
-      { role: "assistant", content: "", thinking: "", thinkingStreaming: true, steps: [], proposals: [], editorReport: null, streaming: true },
+      { role: "assistant", content: "", steps: [], proposals: [], editorReport: null, streaming: true },
     ]);
     setInput("");
     setLoading(true);
@@ -1150,6 +1165,8 @@ export default function Home() {
         proposals: [] as string[],
         reply: "",
         thinking: "",
+        thinkingStreaming: false,
+        thinkingStartedAt: null as number | null,
         tasks: [] as TeamTask[],
         patchAssistant,
       };
@@ -1533,7 +1550,7 @@ export default function Home() {
               className="rounded accent-[#00cbd6]"
             />
             <span className="font-medium text-white/85">Force team</span>
-            <span className="text-capcut text-[10px]">Otherwise auto-routes (Q&A / edit / team)</span>
+            <span className="text-capcut text-[10px]">Big re-edits only — simple edits use edit agent</span>
           </label>
         </header>
 
@@ -1757,6 +1774,7 @@ export default function Home() {
                           steps={msg.steps}
                           thinking={msg.thinking}
                           thinkingStreaming={msg.thinkingStreaming}
+                          thinkingSeconds={msg.thinkingSeconds}
                           agent={msg.thinkingAgent}
                           editorReport={msg.editorReport}
                           streaming={msg.streaming}
@@ -1768,6 +1786,7 @@ export default function Home() {
                         content={msg.content}
                         thinking={msg.thinking}
                         thinkingStreaming={msg.thinkingStreaming}
+                        thinkingSeconds={msg.thinkingSeconds}
                         agent={msg.thinkingAgent}
                         steps={msg.steps}
                         proposals={msg.proposals}

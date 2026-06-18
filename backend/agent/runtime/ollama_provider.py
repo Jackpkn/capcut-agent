@@ -582,6 +582,7 @@ def call_ollama(
     max_output_tokens: int,
     agent: str = "",
     on_chunk: ChunkCallback | None = None,
+    think: bool | None = None,
 ) -> ModelResponse | None:
     from agent.runtime.agent_log import llm_timer
 
@@ -595,11 +596,11 @@ def call_ollama(
         else resolve_ollama_model()
     )
     messages = _messages_for_ollama_client(
-        _input_items_to_messages(instructions, input_items, model=model),
+        _input_items_to_messages(instructions, input_items, model=model, think=think),
     )
     ollama_tools = _responses_tools_to_openai(tools)
     options = _ollama_chat_options(model, temperature, max_output_tokens)
-    use_think = _use_ollama_think(model)
+    use_think = _use_ollama_think(model, think=think)
 
     try:
         with llm_timer("ollama", model, agent=agent, tools=len(tools or [])):

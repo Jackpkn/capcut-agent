@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 PRESETS: dict[str, dict] = {
     "travel_vlog": {
         "label": "Travel vlog",
-        "keywords": ("travel", "vlog", "trip", "bali", "vacation", "journey", "wander"),
         "mood": "fun",
         "speed": 1.1,
         "speed_clips": "all",
@@ -21,7 +20,6 @@ PRESETS: dict[str, dict] = {
     },
     "tiktok_viral": {
         "label": "TikTok viral",
-        "keywords": ("tiktok", "viral", "reels", "shorts", "hype", "insane"),
         "mood": "energetic",
         "speed": 1.25,
         "speed_clips": "2-",
@@ -35,7 +33,6 @@ PRESETS: dict[str, dict] = {
     },
     "cinematic": {
         "label": "Cinematic",
-        "keywords": ("cinematic", "film", "movie", "netflix", "trailer", "dramatic"),
         "mood": "dramatic",
         "speed": 1.0,
         "speed_clips": "none",
@@ -49,7 +46,6 @@ PRESETS: dict[str, dict] = {
     },
     "energetic": {
         "label": "Energetic montage",
-        "keywords": ("energetic", "fast", "pump", "montage"),
         "mood": "energetic",
         "speed": 1.2,
         "speed_clips": "2-3",
@@ -63,7 +59,6 @@ PRESETS: dict[str, dict] = {
     },
     "blog": {
         "label": "Blog-style video",
-        "keywords": ("blog", "blogger", "article", "newsletter", "substack"),
         "mood": "conversational",
         "speed": 1.0,
         "speed_clips": "all",
@@ -77,7 +72,6 @@ PRESETS: dict[str, dict] = {
     },
     "custom": {
         "label": "Custom edit",
-        "keywords": (),
         "mood": "balanced",
         "speed": 1.0,
         "speed_clips": "all",
@@ -118,19 +112,6 @@ class EditBrief:
         }
 
 
-def detect_preset(message: str) -> str | None:
-    """Pick preset with the most keyword hits (e.g. cinematic + travel → travel_vlog)."""
-    lower = message.lower()
-    best_id: str | None = None
-    best_score = 0
-    for preset_id, cfg in PRESETS.items():
-        score = sum(1 for kw in cfg["keywords"] if kw in lower)
-        if score > best_score:
-            best_score = score
-            best_id = preset_id
-    return best_id
-
-
 def _pick_hook_clip(clips: list[dict], style: str) -> dict:
     if not clips:
         return {}
@@ -142,14 +123,13 @@ def _pick_hook_clip(clips: list[dict], style: str) -> dict:
 
 
 def build_edit_brief(
-    user_message: str,
     summary: dict,
     preset_id: str | None = None,
 ) -> EditBrief:
     from agent.preset_config import effective_preset_config
 
     preset_id = preset_id or "custom"
-    cfg = effective_preset_config(preset_id, user_message)
+    cfg = effective_preset_config(preset_id)
     clips = summary.get("video_clips", [])
     hook_clip = _pick_hook_clip(clips, cfg.get("hook_style", "energy_burst"))
     hook_idx = hook_clip.get("index", 1) if hook_clip else 1

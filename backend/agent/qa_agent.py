@@ -12,14 +12,14 @@ def _segment_ids_in_slice(slice_data: dict, domain: str) -> set[str]:
         for clip in slice_data.get("clips", []):
             if clip.get("segment_id"):
                 ids.add(clip["segment_id"])
-    if domain == "audio":
+    elif domain == "audio":
         for clip in slice_data.get("clips", []):
             if clip.get("segment_id"):
                 ids.add(clip["segment_id"])
-    for track in slice_data.get("tracks", []):
-        for seg in track.get("segments", []):
-            if seg.get("id"):
-                ids.add(seg["id"])
+    elif domain == "text":
+        for overlay in slice_data.get("overlays", []):
+            if overlay.get("segment_id"):
+                ids.add(overlay["segment_id"])
     return ids
 
 

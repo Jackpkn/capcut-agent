@@ -42,6 +42,52 @@ def _answer_via_single_agent(session: EditSession, emit: EventEmitter | None) ->
     return session
 
 
+def _edit_via_single_agent(session: EditSession, emit: EventEmitter | None) -> EditSession:
+    """Team planners produced nothing — fall back to direct edit agent + tools."""
+    from agent.brain import stream_agent_events
+    from agent.planner import pending_to_task
+    from agent.runtime.agent_log import agent as log_agent
+    from capcut.reader import get_project_summary
+
+    log_agent("team fallback → edit agent", session_id=session.id)
+    if emit:
+        emit({
+            "type": "step",
+            "id": "edit_fallback",
+            "status": "running",
+            "label": "Edit agent — direct tool proposals…",
+        })
+
+    result = stream_agent_events(
+        session.human_message,
+        session.project_path,
+        emit=emit,
+        project_summary=get_project_summary(session.project_path),
+    )
+    if not result.pending_actions:
+        session.brief_markdown = result.reply or (
+            "Could not plan edits via team workflow — edit agent returned no proposals."
+        )
+        session.tasks = []
+        session.status = SessionStatus.DONE
+        update_session(session)
+        return session
+
+    session.tasks = [
+        pending_to_task(item, session.project_path, 100 - i)
+        for i, item in enumerate(result.pending_actions)
+    ]
+    session.brief_markdown = result.reply
+    if result.reply and result.pending_actions:
+        plan = "\n".join(f"  • {t.description}" for t in session.tasks)
+        session.brief_markdown = (
+            f"{result.reply}\n\n**Planned changes (awaiting approval):**\n{plan}"
+        ).strip()
+    session.status = SessionStatus.QUEUED
+    update_session(session)
+    return session
+
+
 def plan_session(session: EditSession, emit: EventEmitter | None = None) -> EditSession:
     """Director (LLM) decides answer vs edit → Planner queues tasks."""
     from agent.runtime.agent_log import agent as log_agent
@@ -166,17 +212,10 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
         rate_hint = ""
         if any("rate" in n.lower() or "limit" in n.lower() for n in all_notes):
             rate_hint = (
-                " Model rate limit may be active — wait ~60s, switch LLM_PROVIDER, "
-                "or turn off **Force team** for a lighter single-agent request."
+                " Model rate limit may be active — wait ~60s or switch LLM_PROVIDER."
             )
-        session.brief_markdown += (
-            "\n\n**No tasks planned** — timeline may already match the brief, "
-            "or planners could not run." + rate_hint
-            + "\n\nSave in CapCut (Cmd+S) if the timeline looks empty on disk."
-        )
-        session.status = SessionStatus.DONE
-        update_session(session)
-        return session
+        log_agent("no team tasks — edit agent fallback", session_id=session.id)
+        return _edit_via_single_agent(session, emit)
     session.status = SessionStatus.QUEUED
     update_session(session)
     log_agent(
@@ -536,8 +575,12 @@ def apply_session_tasks(session_id: str) -> tuple[list[str], str]:
     )
     sync_capcut(session.project_path)
 
-    for t in tasks:
-        t.status = TaskStatus.DONE
+    for t, res in zip(tasks, results):
+        if res.startswith("Failed to apply:"):
+            t.status = TaskStatus.FAILED
+            t.agent_reasoning += f" Error: {res}"
+        else:
+            t.status = TaskStatus.DONE
 
     _record_applied_actions(session, actions)
     from agent.runtime.agent_log import agent as log_agent
@@ -586,24 +629,44 @@ def iter_apply_actions_sse(
                 "status": "running",
                 "label": f"[{i}/{len(actions)}] {desc}",
             })
-            msg = execute_action(action, params, project_path)
-            results.append(msg)
+            cdp = None
+            try:
+                msg = execute_action(action, params, project_path)
+                results.append(msg)
 
-            if session:
-                for task in session.tasks:
-                    if task.action == action and task.params == params:
-                        task.status = TaskStatus.DONE
-                        break
-                update_session(session)
+                if session:
+                    for task in session.tasks:
+                        if task.action == action and task.params == params:
+                            task.status = TaskStatus.DONE
+                            break
+                    update_session(session)
 
-            cdp = sync_capcut(project_path)
-            yield sse_line({
-                "type": "step",
-                "id": step_id,
-                "status": "done",
-                "label": f"[{i}/{len(actions)}] {desc}",
-                "detail": msg,
-            })
+                cdp = sync_capcut(project_path)
+                yield sse_line({
+                    "type": "step",
+                    "id": step_id,
+                    "status": "done",
+                    "label": f"[{i}/{len(actions)}] {desc}",
+                    "detail": msg,
+                })
+            except Exception as e:
+                msg = f"Failed to apply: {e}"
+                results.append(msg)
+                if session:
+                    for task in session.tasks:
+                        if task.action == action and task.params == params:
+                            task.status = TaskStatus.FAILED
+                            task.agent_reasoning += f" Error: {e}"
+                            break
+                    update_session(session)
+                yield sse_line({
+                    "type": "step",
+                    "id": step_id,
+                    "status": "error",
+                    "label": f"[{i}/{len(actions)}] {desc} (Failed)",
+                    "detail": str(e),
+                })
+
             yield sse_line({
                 "type": "task_applied",
                 "index": i,

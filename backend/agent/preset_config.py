@@ -8,29 +8,9 @@ from agent.director import PRESETS
 from capcut.catalog import search_catalog
 
 
-def effective_preset_config(preset_id: str, user_message: str) -> dict:
-    """Merge preset with message-specific overrides (e.g. blog, cinematic + travel)."""
-    lower = user_message.lower()
-    if preset_id == "custom":
-        if any(kw in lower for kw in ("blog", "blogger", "article", "newsletter")):
-            preset_id = "blog"
-        elif any(kw in lower for kw in ("cinematic", "film", "movie")):
-            preset_id = "cinematic"
-        elif any(kw in lower for kw in ("tiktok", "reels", "viral")):
-            preset_id = "tiktok_viral"
-
-    cfg = copy.deepcopy(PRESETS.get(preset_id, PRESETS["custom"]))
-
-    if preset_id == "travel_vlog" and "cinematic" in lower:
-        cfg["label"] = "Cinematic travel vlog"
-        cfg["mood"] = "cinematic"
-        cfg["speed"] = 1.0
-        cfg["speed_clips"] = "all"
-        cfg["music_search"] = ("cinematic", "epic", "emotional", "acoustic")
-        cfg["transition_query"] = "fade"
-        cfg["visible_captions"] = True
-
-    return cfg
+def effective_preset_config(preset_id: str) -> dict:
+    """Return preset config — preset_id is chosen by the Director LLM."""
+    return copy.deepcopy(PRESETS.get(preset_id, PRESETS["custom"]))
 
 
 def timeline_music_names(summary: dict) -> set[str]:
@@ -71,13 +51,12 @@ def music_action_for_preset(
     cfg: dict,
     summary: dict,
     *,
-    user_message: str = "",
     volume: float = 0.62,
 ) -> dict | None:
     """Params for add_music or replace_music, or None if nothing new to add."""
     from agent.plan_guard import should_change_music
 
-    if not should_change_music(cfg, summary, user_message):
+    if not should_change_music(cfg, summary):
         return None
 
     hit = pick_fresh_music(cfg, summary)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from collections.abc import Iterator
 
 from agent.auto_edit import build_auto_edit_message, display_label
@@ -12,7 +14,7 @@ from agent.runtime.agent_log import agent as log_agent
 from agent.streaming import sse_line
 from analysis.clip_intelligence import iter_understand_sse, load_project_intelligence
 from core.agent_loop import iter_team_sse
-from core.slices import get_timeline_summary
+from core.slices import timeline_summary_from_project_summary
 from core.task_queue import start_session
 
 
@@ -49,33 +51,62 @@ def iter_unified_sse(
             "hint": human_hint or None,
         })
 
-    timeline = get_timeline_summary(project_path) if project_path else {}
-
-    import queue
-    import threading
-
-    route_q: queue.Queue = queue.Queue()
+    preload_box: dict = {}
     route_box: dict = {}
+    box_lock = threading.Lock()
+    timeline_ready = threading.Event()
+    route_q: queue.Queue = queue.Queue()
+
+    def preload_worker() -> None:
+        if not project_path:
+            with box_lock:
+                preload_box["timeline"] = {}
+                preload_box["project_summary"] = None
+            timeline_ready.set()
+            return
+        try:
+            from capcut.reader import get_project_summary
+
+            summary = get_project_summary(project_path)
+            with box_lock:
+                preload_box["project_summary"] = summary
+                preload_box["timeline"] = timeline_summary_from_project_summary(summary)
+        except Exception as exc:
+            log_agent("preload failed", error=str(exc))
+            with box_lock:
+                preload_box["error"] = str(exc)
+                preload_box["timeline"] = {}
+                preload_box["project_summary"] = None
+        finally:
+            timeline_ready.set()
 
     def route_worker() -> None:
-        route_box["route"] = decide_route(
+        timeline_ready.wait()
+        with box_lock:
+            timeline_val = preload_box.get("timeline") or {}
+        route_decision = decide_route(
             agent_message,
-            timeline,
+            timeline_val,
             project_path,
             force_team=force_team,
             auto_edit=auto_edit,
             emit=lambda ev: route_q.put(ev),
         )
+        with box_lock:
+            route_box["route"] = route_decision
         route_q.put(None)
 
+    threading.Thread(target=preload_worker, daemon=True).start()
     threading.Thread(target=route_worker, daemon=True).start()
+
     while True:
         ev = route_q.get()
         if ev is None:
             break
         yield sse_line(ev)
 
-    route = route_box["route"]
+    with box_lock:
+        route = route_box["route"]
 
     log_agent("route", mode=route.mode, label=route.ui_label, reason=route.reason[:100])
 
@@ -135,10 +166,14 @@ def iter_unified_sse(
         "note": "Single agent with project context and tools.",
     })
 
+    with box_lock:
+        summary_val = preload_box.get("project_summary")
+
     for line in iter_agent_sse(
         message,
         project_path,
         answer_only=(route.mode == "answer"),
+        project_summary=summary_val,
     ):
         payload = line.removeprefix("data: ").strip()
         if payload:

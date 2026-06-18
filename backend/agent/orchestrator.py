@@ -12,16 +12,17 @@ from agent.streaming import EventEmitter, step as emit_step
 logger = logging.getLogger(__name__)
 
 ORCHESTRATOR_INSTRUCTIONS = """You are the CapCut orchestrator. Read the human message (any language) and project snapshot.
-Call route_request exactly once. You decide — there are no keyword rules.
+You MUST call route_request exactly once — plain text replies are not accepted.
 
 ## Modes
 - **answer**: Greetings, questions, inspection, advice, timeline **visuals**, project scan. No timeline writes.
-- **edit**: Focused changes — one area or a few related tweaks (fix a caption, add music, one transition, speed one clip).
-- **team**: Large coordinated re-edits — pacing + music + captions + FX across many clips.
+- **edit**: One focused change (add transition, fix caption, music, speed one clip) → mode=edit.
+- **team**: Large multi-area re-edit (pacing + music + captions across many clips).
   Team agents work **one after another** on the same timeline (never parallel).
 
 ## Routing judgment (your call — no code shortcuts)
 - Casual chat or thanks with no edit ask → **answer**
+- **Analyze, review, suggest improvements, feedback, or "how can I improve"** → **answer** (advice only — no timeline writes unless they explicitly ask you to apply changes)
 - Style/vibe requests on **short** timelines (few clips, low duration_sec) → **edit** (single agent is enough)
 - **team** only for long multi-chapter re-edits or explicit "re-edit everything" scope
 - In `reason`, summarize the **user's actual words** — never copy example phrases from these instructions
@@ -82,6 +83,12 @@ def _parse_route(response) -> RouteDecision | None:
     return None
 
 
+_ROUTE_RETRY_NUDGE = (
+    "Call route_request now with mode (answer, edit, or team), reason, and ui_label. "
+    "Do not reply in plain text."
+)
+
+
 def _llm_route(
     message: str,
     timeline_summary: dict,
@@ -107,17 +114,27 @@ def _llm_route(
         return None
     if response is None:
         return None
-    return _parse_route(response)
+    parsed = _parse_route(response)
+    if parsed is not None:
+        return parsed
 
-
-def _looks_like_edit_request(message: str) -> bool:
-    m = message.lower()
-    markers = (
-        "transition", "music", "caption", "effect", "trim", "speed",
-        "add ", "remove", "change", "make it", "make this", "better",
-        "improve", "reorder", "sticker", "image", "anything",
-    )
-    return any(w in m for w in markers)
+    logger.warning("Orchestrator did not call route_request — retrying once")
+    try:
+        retry = call_model(
+            instructions=ORCHESTRATOR_INSTRUCTIONS,
+            input_items=[*input_items, {"role": "user", "content": _ROUTE_RETRY_NUDGE}],
+            tools=ROUTE_TOOL,
+            temperature=0.1,
+            max_output_tokens=256,
+            agent="orchestrator",
+            emit=emit,
+        )
+    except Exception as exc:
+        logger.warning("Orchestrator retry failed: %s", exc)
+        return None
+    if retry is None:
+        return None
+    return _parse_route(retry)
 
 
 def decide_route(
@@ -155,28 +172,32 @@ def decide_route(
         emit_step(emit, "orchestrator", "Understanding what you need…")
         parsed = _llm_route(message, timeline_summary, emit=emit)
 
-    # Questions / visuals / scan — unless the user clearly asked for an edit
+    # Trust orchestrator LLM — no keyword override (see AGENTS.md).
     if parsed and parsed.mode == "answer":
-        if _looks_like_edit_request(message):
-            parsed = RouteDecision(
-                mode="edit",
-                reason=parsed.reason or "Edit request detected in your message.",
-                ui_label="Edit agent",
-            )
-        else:
-            emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
-            return parsed
+        emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
+        return parsed
+
+    # Focused edits → single edit agent (even when Force team is on).
+    if parsed and parsed.mode == "edit":
+        emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
+        return parsed
 
     if force_team:
         emit_step(
-            emit, "orchestrator", "Sequential team (forced)", "done",
-            "Force team is on — multi-agent workflow for edits.",
+            emit, "orchestrator",
+            "Sequential team",
+            "done",
+            "Force team — Director → scene planners → specialists.",
         )
         return RouteDecision(
             mode="team",
-            reason="You enabled force team mode — sequential multi-agent workflow.",
-            ui_label="Sequential team (forced)",
+            reason="Force team — Director → scene planners → specialists.",
+            ui_label="Sequential team",
         )
+
+    if parsed and parsed.mode == "team":
+        emit_step(emit, "orchestrator", parsed.ui_label, "done", parsed.reason)
+        return parsed
 
     if not llm_available():
         emit_step(emit, "orchestrator", "Routing to edit agent", "done", "Model offline — single agent")

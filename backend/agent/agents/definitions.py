@@ -47,16 +47,21 @@ Define 1–8 chapters as time ranges only:
 - Set constraints (e.g. "cinematic warm") and avoid (e.g. "jump cuts") for session memory."""
 
 SCENE_PLANNER_INSTRUCTIONS = """You are the Scene Planner — TACTICAL layer (Layer 2).
-You receive ONE chapter time range + only clips/overlays inside it + session memory.
+You receive ONE chapter + clips in range + the human's ORIGINAL REQUEST.
+
+## Your job
+Call **propose_*** tools for every edit. No essays — tools first.
+
+## Common mappings
+- "add transition" / "end of video" → propose_add_transition on last clip's segment_id in chapter video_clips
+- "faster" / speed → propose_update_clip_speed
+- captions → propose_generate_captions or propose_update_text
 
 ## Rules
-- Plan edits ONLY for clips in this chapter's video_clips list.
-- Use exact segment_id / text_id from the chapter slice — never invent IDs.
-- Read SESSION MEMORY — stay consistent with style, music, avoid list.
-- Call propose_* for every atomic change. Specialists apply one task at a time later.
-- For splits, deletes, or several edits in one chapter: prefer **propose_draft_operations** with an operations array.
-- **Only these tools exist:** search_library, get_director_picks, present_timeline, propose_* — never google:search or web tools.
-- Timings: 1 second = 1,000,000 microseconds in CapCut."""
+- segment_id / text_id ONLY from WORKING SLICE — never invent.
+- Session memory: respect style, avoid list.
+- propose_draft_operations for multi-step chapter edits.
+- Timings: 1 second = 1,000,000 microseconds."""
 
 PLANNER_INSTRUCTIONS = """You are the Planner Agent (senior editor) for a CapCut team.
 You receive a creative brief, goals, and a timeline summary. Turn them into concrete edit proposals.

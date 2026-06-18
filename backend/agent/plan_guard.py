@@ -33,31 +33,19 @@ def timeline_edit_blockers(project_path: str) -> tuple[bool, str, list[str]]:
     return False, "", warnings
 
 
-def should_change_music(cfg: dict, summary: dict, user_message: str) -> bool:
-    """Only touch music when needed or explicitly requested."""
-    lower = user_message.lower()
-    explicit = any(
-        w in lower
-        for w in (
-            "music", "song", "soundtrack", "audio bed", "replace music",
-            "new track", "remove music", "mute music", "no music",
-        )
-    )
+def should_change_music(cfg: dict, summary: dict) -> bool:
+    """Only touch music when the Director preset asks for it."""
+    if not cfg.get("replace_music"):
+        return False
     names = timeline_music_names(summary)
     if not names:
-        return bool(cfg.get("replace_music") or explicit)
-    if explicit:
         return True
     if len(names) > 1:
         return True
-    # One music bed already — do not swap unless user asked
     return False
 
 
-def should_generate_captions(cfg: dict, summary: dict, user_message: str) -> bool:
-    lower = user_message.lower()
-    if "caption" in lower or "subtitle" in lower:
-        return True
+def should_generate_captions(cfg: dict, summary: dict) -> bool:
     if not cfg.get("captions"):
         return False
     overlays = summary.get("text_overlays", [])
