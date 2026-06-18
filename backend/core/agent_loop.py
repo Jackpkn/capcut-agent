@@ -6,7 +6,7 @@ import time
 from collections.abc import Iterator
 from typing import Callable
 
-from agent.qa_agent import review_all_tasks, review_task
+from agent.qa_agent import review_task
 from agent.specialists.router import execute_specialist
 from agent.team_director import run_director
 from agent.streaming import sse_line

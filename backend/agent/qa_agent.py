@@ -86,16 +86,6 @@ def review_task(task: Task, project_path: str) -> dict:
     }
 
 
-def review_all_tasks(tasks: list[Task], project_path: str) -> list[Task]:
-    for task in tasks:
-        result = review_task(task, project_path)
-        task.qa_feedback = result["issues"]
-        task.qa_approved = result["approved"]
-        if not result["approved"]:
-            task.agent_reasoning += f" QA flagged: {'; '.join(result['issues'])}"
-    return tasks
-
-
 def review_action(
     action: str,
     params: dict,

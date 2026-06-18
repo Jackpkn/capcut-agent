@@ -1244,10 +1244,6 @@ def stream_agent_events(
     )
 
 
-def chat(user_message: str, project_path: str | None = None) -> ChatResult:
-    return stream_agent_events(user_message, project_path)
-
-
 def iter_agent_sse(
     user_message: str,
     project_path: str | None = None,
@@ -1357,16 +1353,6 @@ def format_execute_reply(results: list[str]) -> str:
 
 def record_assistant_reply(reply: str) -> None:
     conversation_history.append({"role": "assistant", "content": reply})
-
-
-def confirm_actions(actions: list[dict], project_path: str) -> str:
-    results = execute_actions(actions, project_path)
-    from core.project_ledger import record_applied_edits
-
-    record_applied_edits(project_path, actions)
-    reply = format_execute_reply(results)
-    record_assistant_reply(reply)
-    return reply
 
 
 def reject_actions(reason: str = "User rejected the proposed changes.") -> str:

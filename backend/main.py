@@ -10,11 +10,8 @@ from pydantic import BaseModel
 
 from agent.actions import iter_execute_sse
 from agent.brain import (
-    chat,
-    confirm_actions,
     format_execute_reply,
     hydrate_analysis_from_cache,
-    iter_agent_sse,
     record_assistant_reply,
     reject_actions,
     set_analysis_context,
@@ -66,11 +63,6 @@ app.add_middleware(
 )
 
 
-class ChatRequest(BaseModel):
-    message: str
-    project_path: str | None = None
-
-
 class ActionItem(BaseModel):
     action: str
     params: dict
@@ -84,8 +76,6 @@ class ExecuteRequest(BaseModel):
 
 class RejectRequest(BaseModel):
     reason: str | None = None
-    project_path: str | None = None
-    actions: list[ActionItem] | None = None
     project_path: str | None = None
     actions: list[ActionItem] | None = None
 
@@ -285,53 +275,6 @@ def agent_stream_endpoint(req: AgentStreamRequest):
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.post("/chat/stream")
-def chat_stream_endpoint(req: ChatRequest):
-    """Legacy chat stream — prefer POST /agent/stream."""
-    if not req.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-    hydrate_analysis_from_cache(req.project_path)
-
-    return StreamingResponse(
-        iter_agent_sse(req.message, req.project_path),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.post("/chat")
-def chat_endpoint(req: ChatRequest):
-    if not req.message.strip():
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-    try:
-        hydrate_analysis_from_cache(req.project_path)
-        result = chat(req.message, req.project_path)
-        action_dicts = [
-            {
-                "action": a.action,
-                "params": a.params,
-                "description": a.description,
-            }
-            for a in result.pending_actions
-        ]
-        payload: dict = {
-            "reply": result.reply,
-            "pending_actions": action_dicts,
-        }
-        if req.project_path and action_dicts:
-            from agent.diff import compute_edit_diff
-
-            payload["edit_diff"] = compute_edit_diff(req.project_path, action_dicts)
-        return payload
-    except Exception as e:
-        logger.exception("Chat error")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/project/restore-backup")
