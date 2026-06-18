@@ -46,7 +46,7 @@ Shared: SessionMemory (style, catalog picks, completed edits, constraints)
 | QA | `backend/agent/qa_agent.py` | ✅ rules; confidence TBD |
 | Team loop | `backend/core/agent_loop.py` | ✅ chapter queue |
 | Domain slices | `backend/core/slices.py` | ✅ |
-| Episodic memory (user taste) | `backend/core/episodic_memory.py` | 🔲 Phase E |
+| Episodic memory (user taste) | `backend/core/episodic_memory.py` | ✅ partial (SQLite + Director context) |
 
 ## Session fields (`EditSession`)
 
@@ -66,10 +66,10 @@ Shared: SessionMemory (style, catalog picks, completed edits, constraints)
 ## Implementation phases
 
 - [x] **Phase A** — Chapters + session memory + scene planner
-- [ ] **Phase B** — Task dependency graph (topological execute)
+- [x] **Phase B** — Task dependency graph (topological execute)
 - [ ] **Phase C** — Reflection agent every N tasks / end of chapter
 - [ ] **Phase D** — QA confidence scores + style vs memory
-- [ ] **Phase E** — Episodic memory (SQLite per user)
+- [ ] **Phase E** — Episodic memory (SQLite per user) — partial: approve/reject + Director taste
 - [ ] **Phase F** — Assets agent (image/video gen APIs)
 
 ## Last updated

@@ -46,13 +46,20 @@ def build_strategic_context(
             })[:8],
         }
 
-    from core.episodic_memory import load_user_preferences
+    from core.episodic_memory import director_taste_block, load_user_preferences
 
     prefs = load_user_preferences()
     if prefs.get("preferred_transitions"):
         ctx["user_preferred_transitions"] = prefs["preferred_transitions"]
+    if prefs.get("preferred_music"):
+        ctx["user_preferred_music"] = prefs["preferred_music"]
     if prefs.get("rejects"):
         ctx["recent_rejects"] = [r.get("reason") or "" for r in prefs["rejects"] if r.get("reason")][:5]
+    if prefs.get("rejected_actions"):
+        ctx["rejected_action_types"] = prefs["rejected_actions"]
+    taste = director_taste_block()
+    if taste:
+        ctx["user_taste_markdown"] = taste
 
     from agent import brain as brain_module
 

@@ -83,21 +83,64 @@ def load_user_preferences(user_id: str = "default") -> dict:
 
     rejects: list[dict] = []
     transitions: list[str] = []
+    music: list[str] = []
+    rejected_actions: list[str] = []
+    avoid_notes: list[str] = []
+
     for event_type, actions_json, reason in rows:
         actions = json.loads(actions_json or "[]")
         if event_type == "rejected":
             rejects.append({"reason": reason or "", "actions": actions[:3]})
+            if reason:
+                avoid_notes.append(reason)
+            for action in actions:
+                name = action.get("action")
+                if name and name not in rejected_actions:
+                    rejected_actions.append(name)
         elif event_type == "approved":
             for action in actions:
-                if action.get("action") != "add_transition":
-                    continue
+                act = action.get("action") or ""
                 params = action.get("params") or {}
-                name = params.get("query") or params.get("name") or params.get("transition")
-                if name and name not in transitions:
-                    transitions.append(str(name))
+                if act == "add_transition":
+                    name = params.get("query") or params.get("name") or params.get("transition")
+                    if name and name not in transitions:
+                        transitions.append(str(name))
+                if act in ("add_music", "replace_music"):
+                    mname = params.get("query") or params.get("name")
+                    if mname and mname not in music:
+                        music.append(str(mname))
 
     return {
         "preferred_transitions": transitions[:5],
+        "preferred_music": music[:5],
         "preferred_speed": None,
         "rejects": rejects[:8],
+        "rejected_actions": rejected_actions[:8],
+        "avoid_notes": avoid_notes[:5],
     }
+
+
+def director_taste_block(user_id: str = "default") -> str:
+    """Short markdown block for Director strategic context."""
+    prefs = load_user_preferences(user_id)
+    lines: list[str] = []
+    if prefs.get("preferred_transitions"):
+        lines.append(
+            "- Preferred transitions: "
+            + ", ".join(f"*{t}*" for t in prefs["preferred_transitions"])
+        )
+    if prefs.get("preferred_music"):
+        lines.append(
+            "- Preferred music beds: "
+            + ", ".join(f"*{m}*" for m in prefs["preferred_music"])
+        )
+    if prefs.get("avoid_notes"):
+        lines.append("- Recent reject reasons: " + "; ".join(prefs["avoid_notes"][:3]))
+    if prefs.get("rejected_actions"):
+        lines.append(
+            "- Often rejected action types: "
+            + ", ".join(prefs["rejected_actions"][:5])
+        )
+    if not lines:
+        return ""
+    return "## User taste (from past sessions)\n" + "\n".join(lines)

@@ -44,7 +44,11 @@ Define 1–8 chapters as time ranges only:
 ## Goals
 2–6 session-wide goals (video/audio/text/effects). Scene planners execute per chapter.
 - Do NOT call propose_* tools.
-- Set constraints (e.g. "cinematic warm") and avoid (e.g. "jump cuts") for session memory."""
+- Set constraints (e.g. "cinematic warm") and avoid (e.g. "jump cuts") for session memory.
+
+## User taste (when present in STRATEGIC PROJECT VIEW)
+- `user_taste_markdown` / `user_preferred_transitions` / `user_preferred_music` / `recent_rejects` come from past approve/reject history.
+- Prefer their transition and music choices when reasonable; respect reject reasons in `avoid[]`."""
 
 SCENE_PLANNER_INSTRUCTIONS = """You are the Scene Planner — TACTICAL layer (Layer 2).
 You receive ONE chapter + clips in range + the human's ORIGINAL REQUEST.

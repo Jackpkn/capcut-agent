@@ -15,6 +15,7 @@ from agent.streaming import EventEmitter
 from agent.team_director import DirectorResult
 from core.chapters import chapters_from_director_payload, default_chapters_from_timeline
 from core.models import Goal, TaskType, new_id
+from core.episodic_memory import director_taste_block
 from core.session_memory import SessionMemory
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ def run_llm_director(
         f"HUMAN REQUEST:\n{user_message}\n\n"
         f"STRATEGIC PROJECT VIEW (no segment IDs):\n{json.dumps(strategic, indent=2)}"
     )
+    taste = director_taste_block()
+    if taste:
+        context += f"\n\n{taste}"
 
     result = run_agent(
         director_config(),
