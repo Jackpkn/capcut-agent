@@ -70,6 +70,7 @@ type Message = {
 };
 type Project = { id: string; name: string; path: string };
 type PendingAction = { action: string; params: Record<string, unknown>; description: string; reason?: string };
+type QaBlockedAction = PendingAction & { qa_issues: string[] };
 
 type EditDiffRow = {
   category: string;
@@ -194,6 +195,7 @@ export default function Home() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [error, setError] = useState("");
   const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
+  const [qaBlocked, setQaBlocked] = useState<QaBlockedAction[]>([]);
   const [editDiff, setEditDiff] = useState<EditDiff | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
   const [rightTab, setRightTab] = useState<"analysis" | "library">("analysis");
@@ -293,6 +295,7 @@ export default function Home() {
     loadSummary(selectedPath);
     setAnalysis(null);
     setPendingActions([]);
+    setQaBlocked([]);
     loadLibraryStats();
   }, [selectedPath, loadSummary, loadLibraryStats]);
 
@@ -651,8 +654,10 @@ export default function Home() {
         const actions = (event.pending_actions as PendingAction[]) ?? (event.actions as PendingAction[]) ?? [];
         const diff = (event.edit_diff as EditDiff | undefined) ?? null;
         const teamPlan = (event.team_plan as TeamPlanPayload | undefined) ?? undefined;
-        const isAnswer = !teamPlan && actions.length === 0;
+        const blocked = (event.qa_blocked as QaBlockedAction[]) ?? [];
+        const isAnswer = !teamPlan && actions.length === 0 && blocked.length === 0;
         setPendingActions(actions);
+        setQaBlocked(blocked);
         if (diff) setEditDiff(diff);
         else if (actions.length) void fetchEditPreview(actions);
         patchStreamingAssistant({
@@ -1053,7 +1058,9 @@ export default function Home() {
       const actions = (event.pending_actions as PendingAction[]) ?? (event.actions as PendingAction[]) ?? [];
       const diff = (event.edit_diff as EditDiff | undefined) ?? null;
       const teamPlan = (event.team_plan as TeamPlanPayload | undefined) ?? undefined;
+      const blocked = (event.qa_blocked as QaBlockedAction[]) ?? [];
       setPendingActions(actions);
+      setQaBlocked(blocked);
       if (diff) {
         setEditDiff(diff);
       } else if (actions.length) {
@@ -1117,6 +1124,7 @@ export default function Home() {
     if (autoEdit) setAutoEditing(true);
     setError("");
     setPendingActions([]);
+    setQaBlocked([]);
     setTeamSessionId(null);
     setTeamAutoEdit(false);
     setTeamTasks([]);
@@ -1194,6 +1202,7 @@ export default function Home() {
     if (!selectedPath || !actionsToApply.length || executing) return;
     setExecuting(true);
     setPendingActions([]);
+    setQaBlocked([]);
     setEditDiff(null);
     setError("");
     setMessages((prev) => [
@@ -1290,6 +1299,7 @@ export default function Home() {
     if (!selectedPath || !actions.length || executing) return;
     setExecuting(true);
     setPendingActions([]);
+    setQaBlocked([]);
     setEditDiff(null);
     setError("");
     setMessages((prev) => [
@@ -1344,6 +1354,10 @@ export default function Home() {
           throw new Error(String(event.message ?? "Execute failed"));
         } else if (type === "done") {
           reply = String(event.reply ?? "");
+          const syncHint = event.capcut_sync_hint ? String(event.capcut_sync_hint) : "";
+          if (syncHint) {
+            log(syncHint, "info");
+          }
           patchApply({ content: reply, steps, streaming: false });
           if (event.queued) {
             wasQueued = true;
@@ -1395,12 +1409,22 @@ export default function Home() {
   }, [queueWaiting, selectedPath, loadStatus, log, pushAgentLive, loadSummary]);
 
   const rejectActions = async () => {
+    const actionsToReject = [...pendingActions];
+    const path = selectedPath;
     setPendingActions([]);
+    setQaBlocked([]);
     setEditDiff(null);
     setTeamSessionId(null);
     setTeamAutoEdit(false);
     setTeamTasks([]);
-    await fetch(`${API}/reject`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    await fetch(`${API}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_path: path || undefined,
+        actions: actionsToReject,
+      }),
+    });
     log("Changes rejected", "info");
   };
 
@@ -1702,6 +1726,21 @@ export default function Home() {
                 <li key={i} className="leading-relaxed">• {a.description}</li>
               ))}
             </ul>
+            {qaBlocked.length > 0 && (
+              <div className="mb-4 rounded-xl border border-rose-500/20 bg-rose-500/5 p-3">
+                <p className="text-[11px] font-medium text-rose-200 mb-2">
+                  QA blocked {qaBlocked.length} other proposal{qaBlocked.length > 1 ? "s" : ""}
+                </p>
+                <ul className="text-[11px] text-rose-100/75 space-y-1">
+                  {qaBlocked.map((a, i) => (
+                    <li key={i}>
+                      {a.description || a.action}
+                      {a.qa_issues?.length ? ` — ${a.qa_issues.join("; ")}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="flex gap-2 flex-wrap">
               <button
                 onClick={() =>
@@ -1724,6 +1763,30 @@ export default function Home() {
                 Reject
               </button>
             </div>
+          </div>
+        )}
+
+        {qaBlocked.length > 0 && pendingActions.length === 0 && (
+          <div className="mx-5 mt-4 p-4 rounded-xl border border-rose-500/25 bg-rose-500/5">
+            <p className="text-xs font-medium text-rose-200 mb-1">QA blocked all proposals</p>
+            <p className="text-[11px] text-rose-100/70 mb-3 leading-relaxed">
+              These edits cannot be applied safely. Ask again with a clearer clip reference or save the project in CapCut (Cmd+S).
+            </p>
+            <ul className="text-xs text-rose-100/80 space-y-2">
+              {qaBlocked.map((a, i) => (
+                <li key={i} className="leading-relaxed">
+                  <span className="font-medium">{a.description || a.action}</span>
+                  {a.qa_issues?.length ? (
+                    <span className="block text-[11px] text-rose-200/60 mt-0.5">
+                      {a.qa_issues.join(" · ")}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            <button onClick={rejectActions} className="btn-secondary px-4 py-2 text-xs cursor-pointer mt-4">
+              Dismiss
+            </button>
           </div>
         )}
 
