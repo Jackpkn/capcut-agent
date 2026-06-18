@@ -286,6 +286,34 @@ def _segment_template(data: dict, track_type: str) -> dict | None:
     return None
 
 
+def _match_catalog_hit(hits: list[dict], query_str: str) -> dict | None:
+    if not hits:
+        return None
+    if query_str:
+        for hit in hits:
+            name = hit.get("name") or ""
+            if name and any(word in name.lower() for word in query_str.split()):
+                return hit
+    return hits[0]
+
+
+def _catalog_fallback_asset(params: dict, asset_type: str, *, limit: int) -> dict | None:
+    from capcut.catalog import search_catalog
+
+    hits = search_catalog("", asset_type, limit=limit)
+    query_str = (params.get("query") or params.get("name") or "").lower()
+    asset = _match_catalog_hit(hits, query_str)
+    if asset:
+        logger.warning(
+            "%s '%s' not found in catalog. Using fallback: '%s' (%s)",
+            asset_type.title(),
+            params,
+            asset.get("name"),
+            asset.get("resource_id"),
+        )
+    return asset
+
+
 def _resolve_asset(params: dict, asset_type: str, project_path: str | None = None) -> dict:
     asset = None
     if params.get("resource_id"):
@@ -296,42 +324,15 @@ def _resolve_asset(params: dict, asset_type: str, project_path: str | None = Non
         asset = get_asset(name=params["query"], asset_type=asset_type)
     
     if not asset:
-        # Fallback logic to prevent crash when specific transition/effect/etc is not found in local catalog
-        from capcut.catalog import search_catalog
-        if asset_type == "transition":
-            hits = search_catalog("", "transition", limit=20)
-            if hits:
-                query_str = (params.get("query") or params.get("name") or "").lower()
-                matched = None
-                if query_str:
-                    for h in hits:
-                        if h.get("name") and any(word in h["name"].lower() for word in query_str.split()):
-                            matched = h
-                            break
-                asset = matched or hits[0]
-                logger.warning(f"Transition '{params}' not found in catalog. Using fallback: '{asset['name']}' ({asset['resource_id']})")
-        elif asset_type == "effect":
-            hits = search_catalog("", "effect", limit=20)
-            if hits:
-                query_str = (params.get("query") or params.get("name") or "").lower()
-                matched = None
-                if query_str:
-                    for h in hits:
-                        if h.get("name") and any(word in h["name"].lower() for word in query_str.split()):
-                            matched = h
-                            break
-                asset = matched or hits[0]
-                logger.warning(f"Effect '{params}' not found in catalog. Using fallback: '{asset['name']}' ({asset['resource_id']})")
-        elif asset_type == "sticker":
-            hits = search_catalog("", "sticker", limit=1)
-            if hits:
-                asset = hits[0]
-                logger.warning(f"Sticker '{params}' not found in catalog. Using fallback: '{asset['name']}' ({asset['resource_id']})")
-        elif asset_type == "text_template":
-            hits = search_catalog("", "text_template", limit=1)
-            if hits:
-                asset = hits[0]
-                logger.warning(f"Text template '{params}' not found in catalog. Using fallback: '{asset['name']}' ({asset['resource_id']})")
+        fallback_limits = {
+            "transition": 20,
+            "effect": 20,
+            "sticker": 1,
+            "text_template": 1,
+        }
+        limit = fallback_limits.get(asset_type)
+        if limit is not None:
+            asset = _catalog_fallback_asset(params, asset_type, limit=limit)
 
     if not asset:
         raise ValueError(f"{asset_type} not found in catalog: {params}")
