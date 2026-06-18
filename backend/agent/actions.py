@@ -265,6 +265,7 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
         return f'Replaced music with "{result["name"]}"{extra}'
 
     if action == "add_transition":
+        from capcut.reader import get_project_summary
         from capcut.segment_resolve import resolve_video_segment_id
 
         video_clips = get_project_summary(project_path).get("video_clips", [])
