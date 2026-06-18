@@ -35,7 +35,7 @@ from capcut.apply_queue import (
     start_apply_poller,
 )
 from capcut.guard import assert_safe_to_write, can_write_safely, is_capcut_running
-from capcut.project_ui import apply_with_ui_handoff, reopen_project
+from capcut.project_ui import apply_with_ui_handoff, capcut_sync_hint, reopen_project
 from capcut.writer import _flush_project
 
 logging.basicConfig(level=logging.INFO)
@@ -84,6 +84,10 @@ class ExecuteRequest(BaseModel):
 
 class RejectRequest(BaseModel):
     reason: str | None = None
+    project_path: str | None = None
+    actions: list[ActionItem] | None = None
+    project_path: str | None = None
+    actions: list[ActionItem] | None = None
 
 
 class CatalogDownloadRequest(BaseModel):
@@ -397,6 +401,7 @@ def queue_apply_endpoint(req: ExecuteRequest):
         }
 
     from agent.actions import execute_actions
+    from core.episodic_memory import record_approval
     from core.project_ledger import record_applied_edits
 
     results, suffix = apply_with_ui_handoff(
@@ -404,6 +409,7 @@ def queue_apply_endpoint(req: ExecuteRequest):
         lambda: execute_actions(actions, req.project_path),
     )
     record_applied_edits(req.project_path, actions)
+    record_approval(req.project_path, actions)
     sync_capcut(req.project_path)
     reply = format_execute_reply(results) + suffix
     record_assistant_reply(reply)
@@ -517,21 +523,20 @@ def execute_stream_endpoint(req: ExecuteRequest):
         if last_done and last_done.get("results"):
             results = last_done["results"]
             reply = format_execute_reply(results)
-            if reopened:
-                reply += (
-                    "\n\nProject reopened in CapCut with your edits. "
-                    "Scrub the timeline — captions appear at the **bottom** in white. "
-                    "If missing, click **Home** and reopen the project once."
-                )
-            else:
-                from capcut.project_ui import draft_name_from_path
-                name = draft_name_from_path(req.project_path)
-                reply += (
-                    f"\n\nEdits saved on disk. From CapCut **Home**, open project **{name}** to review."
-                )
+            sync_hint = capcut_sync_hint(req.project_path, reopened=reopened)
+            reply += f"\n\n{sync_hint}"
             record_assistant_reply(reply)
+            from core.episodic_memory import record_approval
+
+            record_approval(req.project_path, actions)
             sync_capcut(req.project_path)
-            yield sse_line({"type": "done", "reply": reply, "results": results})
+            yield sse_line({
+                "type": "done",
+                "reply": reply,
+                "results": results,
+                "capcut_sync_hint": sync_hint,
+                "reopened": reopened,
+            })
 
     return StreamingResponse(
         wrapped(),
@@ -551,6 +556,7 @@ def execute_endpoint(req: ExecuteRequest):
             for a in req.actions
         ]
         from agent.actions import execute_actions
+        from core.episodic_memory import record_approval
         from core.project_ledger import record_applied_edits
 
         results, suffix = apply_with_ui_handoff(
@@ -558,6 +564,7 @@ def execute_endpoint(req: ExecuteRequest):
             lambda: execute_actions(actions, req.project_path),
         )
         record_applied_edits(req.project_path, actions)
+        record_approval(req.project_path, actions)
         reply = format_execute_reply(results) + suffix
         record_assistant_reply(reply)
         cdp_result = sync_capcut(req.project_path)
@@ -572,6 +579,13 @@ def execute_endpoint(req: ExecuteRequest):
 
 @app.post("/reject")
 def reject_endpoint(req: RejectRequest):
+    from core.episodic_memory import record_rejection
+
+    actions = [
+        {"action": a.action, "params": a.params, "description": a.description}
+        for a in (req.actions or [])
+    ]
+    record_rejection(req.project_path, actions, req.reason)
     reply = reject_actions(req.reason or "Changes rejected. Let me know what you'd like instead.")
     return {"reply": reply}
 

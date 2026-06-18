@@ -1303,19 +1303,46 @@ def iter_agent_sse(
         {"action": a.action, "params": a.params, "description": a.description}
         for a in result.pending_actions
     ]
+    reply = result.reply
     done_event: dict = {
         "type": "done",
-        "reply": result.reply,
+        "reply": reply,
         "pending_actions": action_dicts,
     }
     if result.thinking:
         done_event["thinking"] = result.thinking
     if project_path and action_dicts:
         from agent.diff import compute_edit_diff
+        from agent.qa_agent import review_pending_actions
         from core.project_ledger import record_proposed_edits
 
-        record_proposed_edits(project_path, action_dicts)
-        done_event["edit_diff"] = compute_edit_diff(project_path, action_dicts)
+        approved, blocked, reviews = review_pending_actions(
+            action_dicts,
+            project_path,
+            project_summary=project_summary,
+        )
+        done_event["qa_review"] = reviews
+        if blocked:
+            done_event["qa_blocked"] = blocked
+        action_dicts = approved
+        done_event["pending_actions"] = action_dicts
+        if blocked and not approved:
+            issues = "; ".join(
+                f"{b.get('description') or b['action']}: {', '.join(b.get('qa_issues', []))}"
+                for b in blocked
+            )
+            reply = f"{reply}\n\n**QA blocked all proposals:** {issues}"
+            done_event["reply"] = reply
+        elif blocked:
+            reply = (
+                f"{reply}\n\n_QA blocked {len(blocked)} invalid proposal(s) — "
+                "only the valid ones are listed for approval._"
+            )
+            done_event["reply"] = reply
+
+        if action_dicts:
+            record_proposed_edits(project_path, action_dicts)
+            done_event["edit_diff"] = compute_edit_diff(project_path, action_dicts)
     yield sse_line(done_event)
 
 

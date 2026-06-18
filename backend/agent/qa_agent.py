@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from core.models import Task, TaskStatus, TaskType
+from core.models import ACTION_DOMAIN, Task, TaskType, new_id
 from core.slices import get_slice_for_task_type
+from capcut.segment_resolve import SEGMENT_ID_ACTIONS, normalize_pending_params
 
 
 def _segment_ids_in_slice(slice_data: dict, domain: str) -> set[str]:
@@ -93,3 +94,75 @@ def review_all_tasks(tasks: list[Task], project_path: str) -> list[Task]:
         if not result["approved"]:
             task.agent_reasoning += f" QA flagged: {'; '.join(result['issues'])}"
     return tasks
+
+
+def review_action(
+    action: str,
+    params: dict,
+    project_path: str,
+    *,
+    project_summary: dict | None = None,
+) -> dict:
+    """QA a single pending action dict (normalize segment IDs first)."""
+    from capcut.reader import get_project_summary
+
+    summary = project_summary or get_project_summary(project_path)
+    video_clips = summary.get("video_clips", [])
+    normalized = normalize_pending_params(action, dict(params or {}), video_clips)
+    if normalized is None and action in SEGMENT_ID_ACTIONS:
+        return {
+            "approved": False,
+            "confidence": 0.15,
+            "issues": [f"Cannot resolve segment_id for {action}"],
+            "suggestion": "Re-ask using a clip # from the timeline, or save in CapCut (Cmd+S).",
+            "params": params,
+        }
+
+    use_params = normalized if normalized is not None else dict(params or {})
+    task = Task(
+        id=new_id(),
+        description="",
+        instruction="",
+        action=action,
+        params=use_params,
+        type=ACTION_DOMAIN.get(action, TaskType.EFFECTS),
+    )
+    result = review_task(task, project_path)
+    result["params"] = use_params
+    return result
+
+
+def review_pending_actions(
+    actions: list[dict],
+    project_path: str,
+    *,
+    project_summary: dict | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Return (approved_actions, blocked_actions, review_summaries)."""
+    approved: list[dict] = []
+    blocked: list[dict] = []
+    reviews: list[dict] = []
+    for item in actions:
+        rev = review_action(
+            item["action"],
+            item.get("params") or {},
+            project_path,
+            project_summary=project_summary,
+        )
+        reviews.append({
+            "action": item["action"],
+            "description": item.get("description", ""),
+            "approved": rev["approved"],
+            "confidence": rev["confidence"],
+            "issues": rev["issues"],
+        })
+        out = {
+            "action": item["action"],
+            "params": rev["params"],
+            "description": item.get("description", ""),
+        }
+        if rev["approved"]:
+            approved.append(out)
+        else:
+            blocked.append({**out, "qa_issues": rev["issues"]})
+    return approved, blocked, reviews

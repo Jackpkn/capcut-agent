@@ -23,3 +23,6 @@
 *.log
 .pytest_cache/
 .coverage
+
+# Runtime local stores
+backend/data/*.db

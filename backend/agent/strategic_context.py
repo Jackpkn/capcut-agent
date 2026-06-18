@@ -46,6 +46,14 @@ def build_strategic_context(
             })[:8],
         }
 
+    from core.episodic_memory import load_user_preferences
+
+    prefs = load_user_preferences()
+    if prefs.get("preferred_transitions"):
+        ctx["user_preferred_transitions"] = prefs["preferred_transitions"]
+    if prefs.get("rejects"):
+        ctx["recent_rejects"] = [r.get("reason") or "" for r in prefs["rejects"] if r.get("reason")][:5]
+
     from agent import brain as brain_module
 
     clips = brain_module.clip_intelligence_context

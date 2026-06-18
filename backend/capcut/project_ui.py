@@ -207,3 +207,14 @@ def apply_with_ui_handoff(project_path: str, apply_fn) -> tuple[list[str], str]:
         suffix = "\n\nEdits saved to disk."
 
     return results, suffix
+
+
+def capcut_sync_hint(project_path: str, *, reopened: bool) -> str:
+    """Short UX note after apply — shown in execute SSE and API replies."""
+    name = draft_name_from_path(project_path)
+    if reopened:
+        return (
+            "Project reopened in CapCut with your edits. Scrub the timeline — "
+            "captions sit at the bottom in white. If anything looks missing, tap Home and reopen once."
+        )
+    return f"Edits saved on disk. From CapCut Home, open **{name}** to review."
