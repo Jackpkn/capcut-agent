@@ -244,6 +244,8 @@ class AgentStreamRequest(BaseModel):
     project_path: str | None = None
     force_team: bool = False
     auto_edit: bool = False
+    images: list[str] | None = None
+    trust_apply: bool = False
 
 
 @app.post("/agent/stream")
@@ -267,6 +269,8 @@ def agent_stream_endpoint(req: AgentStreamRequest):
             req.project_path,
             force_team=req.force_team,
             auto_edit=req.auto_edit,
+            images=req.images,
+            trust_apply=req.trust_apply,
         ),
         media_type="text/event-stream",
         headers={
@@ -402,82 +406,102 @@ def execute_stream_endpoint(req: ExecuteRequest):
     actions = order_action_dicts(actions)
 
     def wrapped():
+        import logging
+
         from agent.streaming import sse_line
 
-        yield sse_line({
-            "type": "step",
-            "id": "handoff",
-            "status": "running",
-            "label": "Closing project in CapCut so edits can write to disk…",
-        })
+        log = logging.getLogger(__name__)
         try:
-            assert_safe_to_write(req.project_path)
-        except RuntimeError as e:
-            item = queue_apply(req.project_path, actions)
             yield sse_line({
                 "type": "step",
                 "id": "handoff",
-                "status": "error",
-                "label": "Could not unlock project — queued for auto-apply",
-                "detail": str(e),
+                "status": "running",
+                "label": "Closing project in CapCut so edits can write to disk…",
             })
+            try:
+                assert_safe_to_write(req.project_path)
+            except RuntimeError as e:
+                queue_apply(req.project_path, actions)
+                yield sse_line({
+                    "type": "step",
+                    "id": "handoff",
+                    "status": "error",
+                    "label": "Could not unlock project — queued for auto-apply",
+                    "detail": str(e),
+                })
+                yield sse_line({
+                    "type": "done",
+                    "reply": f"**{len(actions)} edits queued.** {e}",
+                    "queued": True,
+                })
+                return
+
             yield sse_line({
-                "type": "done",
-                "reply": f"**{len(actions)} edits queued.** {e}",
-                "queued": True,
+                "type": "step",
+                "id": "handoff",
+                "status": "done",
+                "label": "Timeline unlocked — applying edits…",
             })
-            return
 
-        yield sse_line({
-            "type": "step",
-            "id": "handoff",
-            "status": "done",
-            "label": "Timeline unlocked — applying edits…",
-        })
+            last_done = None
+            for line in iter_execute_sse(actions, req.project_path):
+                if line.startswith("data: "):
+                    try:
+                        ev = json.loads(line[6:].strip())
+                        if ev.get("type") == "done":
+                            last_done = ev
+                            continue
+                        if ev.get("type") == "error":
+                            yield line
+                            return
+                    except json.JSONDecodeError:
+                        pass
+                yield line
 
-        last_done = None
-        for line in iter_execute_sse(actions, req.project_path):
-            if line.startswith("data: "):
-                try:
-                    ev = json.loads(line[6:].strip())
-                    if ev.get("type") == "done":
-                        last_done = ev
-                except json.JSONDecodeError:
-                    pass
-            yield line
-
-        yield sse_line({
-            "type": "step",
-            "id": "reopen",
-            "status": "running",
-            "label": "Reopening project in CapCut…",
-        })
-        reopened = reopen_project(req.project_path)
-        yield sse_line({
-            "type": "step",
-            "id": "reopen",
-            "status": "done" if reopened else "error",
-            "label": "Project reopened in CapCut" if reopened else "Edits saved — tap your project in CapCut",
-        })
-
-        if last_done and last_done.get("results"):
-            from capcut.apply_service import finalize_stream_apply
-
-            results = last_done["results"]
-            outcome = finalize_stream_apply(
-                req.project_path,
-                actions,
-                results,
-                reopened=reopened,
-            )
-            record_assistant_reply(outcome.reply)
             yield sse_line({
-                "type": "done",
-                "reply": outcome.reply,
-                "results": results,
-                "capcut_sync_hint": outcome.sync_hint,
-                "reopened": reopened,
+                "type": "step",
+                "id": "reopen",
+                "status": "running",
+                "label": "Reopening project in CapCut…",
             })
+            reopened = reopen_project(req.project_path)
+            yield sse_line({
+                "type": "step",
+                "id": "reopen",
+                "status": "done" if reopened else "error",
+                "label": "Project reopened in CapCut" if reopened else "Edits saved — tap your project in CapCut",
+            })
+
+            if last_done and last_done.get("results"):
+                from capcut.apply_service import finalize_stream_apply
+
+                results = last_done["results"]
+                outcome = finalize_stream_apply(
+                    req.project_path,
+                    actions,
+                    results,
+                    reopened=reopened,
+                )
+                record_assistant_reply(outcome.reply)
+                yield sse_line({
+                    "type": "done",
+                    "reply": outcome.reply,
+                    "results": results,
+                    "capcut_sync_hint": outcome.sync_hint,
+                    "reopened": reopened,
+                })
+            elif last_done:
+                yield sse_line({
+                    "type": "done",
+                    "reply": last_done.get("reply", "Applied."),
+                    "results": last_done.get("results", []),
+                    "reopened": reopened,
+                })
+            else:
+                yield sse_line({"type": "error", "message": "Apply finished without results"})
+        except Exception as e:
+            log.exception("execute/stream failed")
+            yield sse_line({"type": "error", "message": str(e)})
 
     return StreamingResponse(
         wrapped(),
@@ -556,13 +580,16 @@ def _llm_status() -> dict:
         list_ollama_models,
         ollama_available,
         provider_order,
+        provider_order_for_tools,
         resolve_ollama_model,
     )
 
     order = provider_order()
+    tools_order = provider_order_for_tools()
     return {
         "available": bool(order),
         "provider_order": order,
+        "tools_provider_order": tools_order,
         "ollama": {
             "running": ollama_available(),
             "model": resolve_ollama_model() if ollama_available() else None,

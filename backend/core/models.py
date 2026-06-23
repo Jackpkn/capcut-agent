@@ -58,6 +58,12 @@ ACTION_DOMAIN: dict[str, TaskType] = {
     "add_sticker": TaskType.EFFECTS,
     "update_transition": TaskType.EFFECTS,
     "draft_operations": TaskType.VIDEO,
+    "split_clip": TaskType.VIDEO,
+    "duck_audio": TaskType.AUDIO,
+    "sync_video_to_beats": TaskType.VIDEO,
+    "apply_color_preset": TaskType.EFFECTS,
+    "generate_image": TaskType.ASSETS,
+    "generate_video_clip": TaskType.ASSETS,
 }
 
 SPECIALIST_FOR_TYPE: dict[TaskType, str] = {
@@ -138,6 +144,7 @@ class EditSession:
     project_path: str
     human_message: str
     auto_edit: bool = False
+    trust_apply: bool = False
     status: SessionStatus = SessionStatus.PLANNING
     goals: list[Goal] = field(default_factory=list)
     tasks: list[Task] = field(default_factory=list)
@@ -159,6 +166,7 @@ class EditSession:
             "project_path": self.project_path,
             "human_message": self.human_message,
             "auto_edit": self.auto_edit,
+            "trust_apply": self.trust_apply,
             "status": self.status.value,
             "goals": [g.to_dict() for g in self.goals],
             "tasks": [t.to_dict() for t in self.tasks],

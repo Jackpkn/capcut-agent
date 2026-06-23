@@ -25,6 +25,69 @@ _TASK_DONE_STATUSES = frozenset({
 })
 
 
+def _chapter_label(session: EditSession, chapter_id: str) -> str:
+    for chapter in session.chapters:
+        if chapter.id == chapter_id:
+            return chapter.label
+    return chapter_id or "chapter"
+
+
+def _reflect_chapter_boundary(
+    session: EditSession,
+    chapter_id: str,
+    completed_summaries: list[dict],
+) -> Iterator[str]:
+    """Phase C — reflect after a chapter's tasks finish; skip redundant remaining tasks."""
+    if not chapter_id or not completed_summaries:
+        return
+
+    from agent.reflection_agent import reflect_chapter
+
+    remaining = [
+        {
+            "id": t.id,
+            "action": t.action,
+            "description": t.description,
+            "status": t.status.value,
+        }
+        for t in session.tasks
+        if t.chapter_id == chapter_id and t.status == TaskStatus.PENDING
+    ]
+    reflection = reflect_chapter(
+        chapter_label=_chapter_label(session, chapter_id),
+        human_goal=session.human_message,
+        completed_tasks=completed_summaries,
+        remaining_tasks=remaining,
+    )
+    if not reflection:
+        return
+
+    yield sse_line({
+        "type": "reflection_note",
+        "chapter_id": chapter_id,
+        "summary": reflection.summary,
+        "issues": reflection.issues,
+        "skip_count": len(reflection.skip_task_ids),
+    })
+    if reflection.skip_task_ids:
+        skip_set = set(reflection.skip_task_ids)
+        for task in session.tasks:
+            if task.id in skip_set and task.status == TaskStatus.PENDING:
+                task.status = TaskStatus.REJECTED
+                task.qa_feedback = ["Skipped by reflection — redundant or conflicting"]
+        update_session(session)
+
+
+def _task_reflection_summary(task) -> dict:
+    return {
+        "id": task.id,
+        "action": task.action,
+        "description": task.description,
+        "status": task.status.value,
+        "qa_approved": task.qa_approved,
+    }
+
+
 def _answer_via_single_agent(session: EditSession, emit: EventEmitter | None) -> EditSession:
     """Model-driven Q&A when Director unavailable or chose answer intent."""
     from agent.brain import stream_agent_events
@@ -103,7 +166,7 @@ def plan_session(session: EditSession, emit: EventEmitter | None = None) -> Edit
     update_session(session)
 
     session.status = SessionStatus.PLANNING
-    session.timeline_summary = get_timeline_summary(session.project_path)
+    session.timeline_summary = get_timeline_summary(session.project_path) 
 
     from agent.plan_guard import timeline_edit_blockers
 
@@ -268,7 +331,7 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
                     break
                 yield sse_line(ev)
             session = plan_box["session"]
-
+            
         if session.status == SessionStatus.DONE and not session.tasks:
             from agent.streaming import emit_text_chunks
 
@@ -349,7 +412,20 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
         from agent.streaming import agent_activity
 
         total_tasks = len(session.tasks)
+        active_chapter_id = ""
+        chapter_completed: list[dict] = []
+
         for i, task in enumerate(session.tasks, start=1):
+            if task.chapter_id and active_chapter_id and task.chapter_id != active_chapter_id:
+                yield from _reflect_chapter_boundary(
+                    session, active_chapter_id, chapter_completed,
+                )
+                chapter_completed = []
+            if task.chapter_id and not active_chapter_id:
+                active_chapter_id = task.chapter_id
+            elif task.chapter_id:
+                active_chapter_id = task.chapter_id
+
             if is_paused(session_id):
                 yield sse_line({
                     "type": "loop_paused",
@@ -450,7 +526,13 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
                 "status": "done" if qa["approved"] else "error",
                 "label": f"{task.specialist} — {task.description[:50]}",
             })
+            chapter_completed.append(_task_reflection_summary(task))
             time.sleep(0.08)
+
+        if active_chapter_id and chapter_completed:
+            yield from _reflect_chapter_boundary(
+                session, active_chapter_id, chapter_completed,
+            )
 
         session.status = SessionStatus.AWAITING_APPROVAL
         update_session(session)
@@ -494,6 +576,20 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
             except Exception:
                 pass
 
+        if session.trust_apply and actions:
+            yield sse_line({
+                "type": "team_plan",
+                "plan": team_plan,
+            })
+            yield sse_line({
+                "type": "trust_apply_start",
+                "session_id": session_id,
+                "count": len(actions),
+                "note": "Trust mode — applying approved tasks without manual approve.",
+            })
+            yield from iter_apply_session_sse(session_id)
+            return
+
         yield sse_line({
             "type": "team_plan",
             "plan": team_plan,
@@ -528,6 +624,12 @@ def _format_team_reply(session: EditSession, tasks: list) -> str:
         label = "Auto edit"
     else:
         label = session.brief_data.get("preset_label", "Edit plan")
+    if session.trust_apply:
+        return (
+            f"**{label}** — {len(tasks)} change(s) queued for auto-apply"
+            + (f", {rejected} skipped" if rejected else "")
+            + "."
+        )
     return (
         f"**{label}** — {len(tasks)} change(s) ready to apply"
         + (f", {rejected} skipped by QA" if rejected else "")
@@ -697,7 +799,7 @@ def iter_apply_actions_sse(
         extra_lines: list[str] = []
         skipped = sum(
             1 for r in results
-            if "no change needed" in r.lower() or "skipped" in r.lower()
+            if "no change needed" in r.lower()
         )
         if skipped:
             extra_lines.append(

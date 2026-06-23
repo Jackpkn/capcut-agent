@@ -63,8 +63,7 @@ def ensure_asset_cached(
 
     resource_id = str(asset.get("resource_id") or "")
     asset_type = asset.get("type", "music")
-    search_name = asset.get("name", "")
-
+    search_name = asset.get("name", "") 
     if search_name.endswith("…") or search_name.startswith(asset_type.title()):
         search_name = ""
 

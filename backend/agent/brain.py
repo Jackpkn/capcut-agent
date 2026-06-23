@@ -29,37 +29,16 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-EDIT_SYSTEM_PROMPT = """You are the CapCut **edit agent**. The human approves every change before it runs.
-
-## Workflow (every edit request)
-1. Read WORKING SLICE / timeline data in the message — use exact segment_id and text_id values.
-2. Call **propose_*** tool(s) for each change. Same turn as your short reply.
-3. Never write pseudo-code, `<tool_code>`, or claim edits are already applied.
-
-## Tool guide
-| Request | Tool |
-|---------|------|
-| Add transition (incl. end of video) | propose_add_transition — copy **segment_id** exactly from video_clips (UUID). Never use clip_1 / clip_12 labels. End → **last** video_clips entry. |
-| Change caption text | propose_update_text / propose_batch_update_texts |
-| Music | propose_add_music / propose_replace_music |
-| Speed | propose_update_clip_speed |
-| Timeline visual | present_timeline |
-
-## Rules
-- EDIT LEDGER = past approvals — still propose if they ask again; check live data.
-- **End of video** → last entry in video_clips (by at_sec).
-- Skip no-ops (transition already on that cut, speed unchanged).
-- Short reply (1–3 sentences) + tools."""
+from agent.prompts import (
+    ANSWER_SYSTEM_PROMPT,
+    EDIT_SYSTEM_PROMPT,
+    EMPTY_REPLY_NUDGE as _EMPTY_REPLY_NUDGE,
+    NO_PROJECT_PROMPT,
+    SYNTHESIS_NUDGE,
+    edit_retry_nudge as _edit_retry_nudge,
+)
 
 SYSTEM_PROMPT = EDIT_SYSTEM_PROMPT
-
-ANSWER_SYSTEM_PROMPT = """You are the CapCut AI assistant — friendly, concise, and expert.
-The human may greet you, ask about their project, or want advice. **Do not propose edits** — they only asked to chat or inspect.
-
-For **hi / hello / thanks**: reply in 1–2 short sentences only. Do NOT write a CapCut plan, analysis, or numbered steps.
-For **analyze / review / suggest improvements / feedback**: give expert advice using ONLY ACTIVE PROJECT data. Do not invent music, voiceover, or clips that are not in the project. No tools — plain text/markdown only.
-For other questions: use ACTIVE PROJECT data in the conversation. Mention 1–2 real facts when helpful (clip count, duration).
-Keep replies short (2–4 sentences) unless they asked for detail. No tools — plain text/markdown only."""
 
 TOOLS = [
     {
@@ -332,19 +311,35 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "propose_add_transition",
-            "description": "Propose adding a transition after a video clip. Search library first for resource_id.",
+            "description": (
+                "Add a transition after a video clip (between that clip and the next). "
+                "Set segment_id, clip_index, or placement from where the user wants it. "
+                "See video_clips[].transition for what each cut already has."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "segment_id": {
                         "type": "string",
-                        "description": "Exact segment_id UUID from video_clips in project data — not clip_1 or clip_12",
+                        "description": "Exact segment_id UUID from video_clips (optional if placement/clip_index set)",
+                    },
+                    "clip_index": {
+                        "type": "integer",
+                        "description": "1-based clip index — transition goes after this clip",
+                    },
+                    "placement": {
+                        "type": "string",
+                        "enum": ["end", "first", "between", "after_clip"],
+                        "description": "end=last cut, first=after clip 1, after_clip=use clip_index",
+                    },
+                    "after_clip_index": {
+                        "type": "integer",
+                        "description": "For between/after_clip — transition after this clip number",
                     },
                     "query": {"type": "string"},
                     "resource_id": {"type": "string"},
                     "duration_sec": {"type": "number"},
                 },
-                "required": ["segment_id"],
             },
         },
     },
@@ -395,6 +390,72 @@ TOOLS = [
                     "duration_sec": {"type": "number"},
                     "text_content": {"type": "string"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_split_clip",
+            "description": "Propose splitting a video clip at a timeline position (seconds within the clip).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "segment_id": {"type": "string"},
+                    "at_sec": {"type": "number", "description": "Split point in seconds on the timeline"},
+                },
+                "required": ["segment_id", "at_sec"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_duck_audio",
+            "description": (
+                "Propose ducking background music under voice (lowers music volume). "
+                "Omit segment_id to duck the main audio/music track."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "music_segment_id": {"type": "string"},
+                    "volume": {"type": "number", "description": "Target volume 0.0–1.0 (default 0.2)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_sync_video_to_beats",
+            "description": "Propose aligning video cuts (boundaries) to background music beat intervals (pacing sync).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bpm": {"type": "number", "description": "Tempo in BPM to align clip boundaries to (default 120.0, i.e. 0.5s per beat)"},
+                    "beat_interval": {"type": "number", "description": "Explicit beat interval in seconds (optional, overrides bpm)"}
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_apply_color_preset",
+            "description": (
+                "Propose a color grade / filter preset across the timeline or a clip. "
+                "Presets: cinematic, warm, cool, vintage, vivid, teal_orange, moody — or a catalog query."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "preset": {"type": "string"},
+                    "start_sec": {"type": "number"},
+                    "duration_sec": {"type": "number"},
+                    "bind_segment_id": {"type": "string"},
+                },
+                "required": ["preset"],
             },
         },
     },
@@ -548,6 +609,10 @@ PROPOSE_TO_ACTION = {
     "propose_add_sticker": "add_sticker",
     "propose_add_text_template": "add_text_template",
     "propose_generate_captions": "generate_captions",
+    "propose_split_clip": "split_clip",
+    "propose_duck_audio": "duck_audio",
+    "propose_sync_video_to_beats": "sync_video_to_beats",
+    "propose_apply_color_preset": "apply_color_preset",
     "propose_generate_image": "generate_image",
     "propose_generate_video_clip": "generate_video_clip",
     "propose_draft_operations": "draft_operations",
@@ -557,12 +622,6 @@ IMMEDIATE_TOOLS = {"search_library", "get_director_picks", "present_timeline"}
 
 MAX_CHAT_TURNS = 6
 MAX_HISTORY_TURNS = 10
-
-SYNTHESIS_NUDGE = (
-    "Using the catalog results and project segment_ids above, call propose_* tools now "
-    "for every edit the user asked for. Add a short explanation in your message — "
-    "do not call search_library or get_director_picks again."
-)
 
 conversation_history: list[dict] = []
 _last_project_path: str | None = None
@@ -735,6 +794,8 @@ def _pending_from_suggestions(actions: list[dict]) -> list[PendingAction]:
 def _normalize_pending_list(
     pending: list[PendingAction],
     summary: dict | None,
+    *,
+    user_message: str = "",
 ) -> list[PendingAction]:
     from agent.actions import describe_action
     from capcut.segment_resolve import normalize_pending_params
@@ -742,7 +803,9 @@ def _normalize_pending_list(
     clips = (summary or {}).get("video_clips", [])
     out: list[PendingAction] = []
     for item in pending:
-        params = normalize_pending_params(item.action, item.params, clips)
+        params = normalize_pending_params(
+            item.action, item.params, clips, user_message=user_message,
+        )
         if params is None:
             logger.warning("Dropped invalid segment_id for %s: %s", item.action, item.params)
             continue
@@ -855,28 +918,6 @@ def _format_timeline_summary_reply(summary: dict) -> str:
         f"{ov.get('video_clip_count', 0)} video · {ov.get('audio_clip_count', 0)} audio_"
     )
     return "\n".join(lines)
-
-
-NO_PROJECT_PROMPT = """You are the CapCut AI assistant.
-The user has NOT selected a CapCut project in the sidebar.
-Tell them clearly: pick their project from the dropdown first — timeline questions, visuals, and edits all need project data.
-Do NOT invent captions, clips, or timeline visuals. Do NOT output tool_code, present_timeline, or fake code."""
-
-
-_EMPTY_REPLY_NUDGE = (
-    "Your previous response had no user-visible text. "
-    "Reply to the user in one or two short sentences. No meta commentary or thinking labels."
-)
-
-def _edit_retry_nudge(user_message: str) -> str:
-    """Retry text that quotes the human request — never generic protocol text alone."""
-    request = (user_message or "").strip() or "timeline edit"
-    return (
-        f"Execute this edit request now: «{request}»\n"
-        "Call the matching propose_* tool(s) using segment_ids from WORKING SLICE. "
-        "Do not ask the human to repeat themselves. "
-        "EDIT LEDGER is history — use live timeline data."
-    )
 
 
 def _collect_streamed_reply(
@@ -994,6 +1035,16 @@ def _append_response_to_input(input_items: list, response) -> None:
                 })
 
 
+def _history_to_input_items(history: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    for msg in history:
+        item: dict = {"role": msg["role"], "content": msg["content"]}
+        if msg.get("images"):
+            item["images"] = msg["images"]
+        items.append(item)
+    return items
+
+
 def hydrate_analysis_from_cache(project_path: str | None) -> None:
     if not project_path:
         return
@@ -1017,6 +1068,8 @@ def stream_agent_events(
     *,
     answer_only: bool = False,
     project_summary: dict | None = None,
+    images: list[str] | None = None,
+    preprocessed_images: bool = False,
 ) -> ChatResult:
     """Run the agent loop; emit step/tool events in real time when emit is provided."""
     global _last_project_path
@@ -1028,6 +1081,30 @@ def stream_agent_events(
         _last_project_path = project_path
 
     _trim_history()
+
+    from agent.user_images import enrich_user_message, normalize_images
+
+    if preprocessed_images:
+        enriched_message = user_message
+        image_b64 = normalize_images(images)
+    else:
+        if images:
+            emit_step(emit, "user_images", "Analyzing attached image(s)…", "running")
+        enriched_message, image_b64 = enrich_user_message(user_message, images)
+        if images:
+            if image_b64:
+                emit_step(
+                    emit, "user_images",
+                    f"Attached {len(image_b64)} reference image(s)",
+                    "done",
+                )
+            else:
+                emit_step(
+                    emit, "user_images",
+                    "Could not read attached image(s)",
+                    "error",
+                    "Use JPEG or PNG under 3MB",
+                )
 
     context = ""
     summary: dict | None = None
@@ -1076,30 +1153,29 @@ def stream_agent_events(
             emit_step(emit, "load_project", "Failed to read project", "error", str(e))
             context = f"\n\nError reading project: {e}"
 
-    conversation_history.append({
+    user_entry: dict = {
         "role": "user",
-        "content": user_message + context,
-    })
+        "content": enriched_message + context,
+    }
+    if image_b64:
+        user_entry["images"] = image_b64
+    conversation_history.append(user_entry)
 
     if not project_path:
-        input_items = [{"role": m["role"], "content": m["content"]} for m in conversation_history]
-        return _run_streaming_chat(input_items, emit)
+        return _run_streaming_chat(_history_to_input_items(conversation_history), emit)
 
     if answer_only:
-        input_items = [{"role": m["role"], "content": m["content"]} for m in conversation_history]
         return _run_streaming_chat(
-            input_items,
+            _history_to_input_items(conversation_history),
             emit,
             instructions=ANSWER_SYSTEM_PROMPT,
-            max_output_tokens=384,
+            max_output_tokens=768 if image_b64 else 384,
             agent="chat",
+            think=False if image_b64 else None,
         )
 
     tools = _to_responses_tools(TOOLS)
-    input_items: list[dict] = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in conversation_history
-    ]
+    input_items: list[dict] = _history_to_input_items(conversation_history)
 
     pending: list[PendingAction] = []
     reply_parts: list[str] = []
@@ -1137,7 +1213,9 @@ def stream_agent_events(
             reply_parts.append(step_reply)
         from agent.timeline_anchor import describe_timeline_target
 
-        normalized_step = _normalize_pending_list(step_pending, summary)
+        normalized_step = _normalize_pending_list(
+            step_pending, summary, user_message=enriched_message,
+        )
         for item in normalized_step:
             anchor = describe_timeline_target(item.action, item.params, summary)
             emit_proposal(
@@ -1184,7 +1262,7 @@ def stream_agent_events(
         )
         emit_step(emit, "model", "Model unavailable", "error")
 
-    pending = _normalize_pending_list(pending, summary)
+    pending = _normalize_pending_list(pending, summary, user_message=enriched_message)
     pending = _dedupe_pending(pending)
 
     # Only attempt a final retry if the main loop used few turns (≤2),
@@ -1219,7 +1297,7 @@ def stream_agent_events(
             if retry_reply.strip():
                 reply = retry_reply
 
-    pending = _normalize_pending_list(pending, summary)
+    pending = _normalize_pending_list(pending, summary, user_message=enriched_message)
     pending = _dedupe_pending(pending)
     if project_path and pending:
         from agent.plan_guard import collapse_redundant_pending
@@ -1250,6 +1328,9 @@ def iter_agent_sse(
     *,
     answer_only: bool = False,
     project_summary: dict | None = None,
+    images: list[str] | None = None,
+    preprocessed_images: bool = False,
+    trust_apply: bool = False,
 ):
     """Yield SSE lines while the agent runs (threaded producer)."""
     import queue
@@ -1274,6 +1355,8 @@ def iter_agent_sse(
                 emit=emit,
                 answer_only=answer_only,
                 project_summary=project_summary,
+                images=images,
+                preprocessed_images=preprocessed_images,
             )
         except Exception as e:
             logger.exception("Agent stream error")
@@ -1344,6 +1427,16 @@ def iter_agent_sse(
             record_proposed_edits(project_path, action_dicts)
             done_event["edit_diff"] = compute_edit_diff(project_path, action_dicts)
     yield sse_line(done_event)
+
+    if trust_apply and project_path and action_dicts:
+        from agent.actions import iter_execute_sse
+
+        yield sse_line({
+            "type": "trust_apply_start",
+            "count": len(action_dicts),
+            "note": "Trust mode — applying proposals without manual approve.",
+        })
+        yield from iter_execute_sse(action_dicts, project_path)
 
 
 def format_execute_reply(results: list[str]) -> str:

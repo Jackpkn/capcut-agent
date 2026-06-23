@@ -16,6 +16,7 @@ def _compact_clips(clips: list[dict], limit: int = 20) -> list[dict]:
             "speed": c.get("speed"),
             "volume": c.get("volume"),
             "track_index": c.get("track_index"),
+            "transition": c.get("transition"),
         }
         for c in clips[:limit]
     ]

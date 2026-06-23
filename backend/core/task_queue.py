@@ -16,12 +16,14 @@ def start_session(
     human_message: str,
     *,
     auto_edit: bool = False,
+    trust_apply: bool = False,
 ) -> EditSession:
     session = EditSession(
         id=new_id(),
         project_path=project_path,
         human_message=human_message,
         auto_edit=auto_edit,
+        trust_apply=trust_apply,
     )
     _sessions[session.id] = session
     return session

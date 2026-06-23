@@ -92,13 +92,16 @@ def review_action(
     project_path: str,
     *,
     project_summary: dict | None = None,
+    user_message: str = "",
 ) -> dict:
     """QA a single pending action dict (normalize segment IDs first)."""
     from capcut.reader import get_project_summary
 
     summary = project_summary or get_project_summary(project_path)
     video_clips = summary.get("video_clips", [])
-    normalized = normalize_pending_params(action, dict(params or {}), video_clips)
+    normalized = normalize_pending_params(
+        action, dict(params or {}), video_clips, user_message=user_message
+    )
     if normalized is None and action in SEGMENT_ID_ACTIONS:
         return {
             "approved": False,
@@ -138,6 +141,7 @@ def review_pending_actions(
             item.get("params") or {},
             project_path,
             project_summary=project_summary,
+            user_message=item.get("description") or "",
         )
         reviews.append({
             "action": item["action"],

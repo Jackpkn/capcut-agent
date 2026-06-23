@@ -78,12 +78,12 @@ def provider_order(explicit: str | None = None) -> list[str]:
 def provider_order_for_tools(explicit: str | None = None) -> list[str]:
     """
     Provider order when function calling matters.
-    Defaults to preferring Groq over Ollama (Gemma tool-call reliability).
-  """
+    Defaults to local Ollama (Gemma) — avoids Groq 429s; cloud providers are fallback.
+    """
     order = provider_order(explicit)
     if not order:
         return order
-    preferred = os.environ.get("LLM_TOOLS_PROVIDER", "groq").lower()
+    preferred = os.environ.get("LLM_TOOLS_PROVIDER", "ollama").lower()
     if preferred in order:
         return [preferred] + [n for n in order if n != preferred]
     return order

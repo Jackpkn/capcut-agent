@@ -94,6 +94,7 @@ VIDEO_TOOLS = {
     "propose_reorder_clips",
     "propose_move_segment",
     "propose_set_segment_visibility",
+    "propose_sync_video_to_beats",
 }
 
 AUDIO_TOOLS = {

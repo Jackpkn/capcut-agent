@@ -38,7 +38,7 @@ def run_scene_planner(
 
   if not llm_available():
     return [], [
-      f"Scene planner unavailable for {chapter.label} — set GROQ_API_KEY or GEMINI_API_KEY.",
+      f"Scene planner unavailable for {chapter.label} — start Ollama or set GEMINI_API_KEY.",
     ]
 
   from agent.runtime.groq_rate_state import rate_limit_hint

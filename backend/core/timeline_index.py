@@ -64,9 +64,14 @@ class TimelineIndex:
                     "at_sec": c.get("at_sec"),
                     "duration_sec": c.get("duration_sec"),
                     "segment_id": c.get("segment_id"),
+                    "transition_after": c.get("transition"),
                 }
                 for c in self.video_clips
             ],
+            "transition_note": (
+                "transition_after on each clip = transition on the cut to the next clip; "
+                "null means none on that cut yet"
+            ),
         }
 
     def clip_by_index(self, n: int) -> dict | None:

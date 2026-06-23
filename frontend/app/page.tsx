@@ -10,6 +10,21 @@ import { TaskQueuePanel, type TeamGoal, type TeamTask } from "./components/TaskQ
 
 const API = "http://localhost:8000";
 
+type AttachedImage = { id: string; dataUrl: string; base64: string };
+
+function readImageFile(file: File): Promise<AttachedImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? "");
+      const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
+      resolve({ id: `${Date.now()}-${file.name}`, dataUrl, base64 });
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 function sseContent(event: Record<string, unknown>): string {
   return String(event.content ?? event.delta ?? "");
 }
@@ -21,18 +36,28 @@ async function consumeSSE(
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      const line = part.trim();
-      if (line.startsWith("data: ")) {
-        onEvent(JSON.parse(line.slice(6)));
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (line.startsWith("data: ")) {
+          onEvent(JSON.parse(line.slice(6)));
+        }
       }
     }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Stream failed";
+    if (/failed to fetch|network/i.test(msg)) {
+      throw new Error(
+        "Backend connection lost during apply. Restart the backend, then try Approve again — edits may already be saved on disk."
+      );
+    }
+    throw e;
   }
 }
 
@@ -56,6 +81,7 @@ type AgentStep = {
 type Message = {
   role: string;
   content: string;
+  images?: string[];
   thinking?: string;
   thinkingStreaming?: boolean;
   thinkingAgent?: string;
@@ -174,6 +200,8 @@ const QUICK_PROMPTS = [
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [autoEditing, setAutoEditing] = useState(false);
@@ -205,6 +233,7 @@ export default function Home() {
   const [librarySearching, setLibrarySearching] = useState(false);
   const [librarySyncing, setLibrarySyncing] = useState(false);
   const [teamMode, setTeamMode] = useState(false);
+  const [trustApply, setTrustApply] = useState(false);
   const [teamSessionId, setTeamSessionId] = useState<string | null>(null);
   const [teamAutoEdit, setTeamAutoEdit] = useState(false);
   const [teamTasks, setTeamTasks] = useState<TeamTask[]>([]);
@@ -632,6 +661,23 @@ export default function Home() {
         pushAgentLive({ active: false, title: "Team paused — click Resume to continue" });
         patchStreamingAssistant({ streaming: false });
         log("Team paused by human", "info");
+      } else if (type === "reflection_note") {
+        const summary = String(event.summary ?? "");
+        if (summary) {
+          setAgentLive((prev) => ({
+            ...prev,
+            criticNotes: prev.criticNotes.includes(summary)
+              ? prev.criticNotes
+              : [...prev.criticNotes, summary],
+          }));
+        }
+      } else if (type === "trust_apply_start") {
+        setExecuting(true);
+        setPendingActions([]);
+        pushAgentLive({
+          active: true,
+          title: `Trust mode — auto-applying ${event.count ?? "?"} change(s)…`,
+        });
       } else if (type === "critic_note") {
         const note = String(event.content ?? "");
         setAgentLive((prev) => ({
@@ -655,8 +701,10 @@ export default function Home() {
         const diff = (event.edit_diff as EditDiff | undefined) ?? null;
         const teamPlan = (event.team_plan as TeamPlanPayload | undefined) ?? undefined;
         const blocked = (event.qa_blocked as QaBlockedAction[]) ?? [];
+        const appliedResults = event.results as string[] | undefined;
+        if (appliedResults?.length) setExecuting(false);
         const isAnswer = !teamPlan && actions.length === 0 && blocked.length === 0;
-        setPendingActions(actions);
+        if (!appliedResults?.length) setPendingActions(actions);
         setQaBlocked(blocked);
         if (diff) setEditDiff(diff);
         else if (actions.length) void fetchEditPreview(actions);
@@ -672,13 +720,17 @@ export default function Home() {
         });
         pushAgentLive({
           active: false,
-          title: isAnswer
+          title: appliedResults?.length
+            ? "Applied — check CapCut timeline"
+            : isAnswer
             ? "Answer ready"
             : tasks.length === 0
               ? "Team finished — no edits queued"
               : "Team plan ready — review & approve",
         });
-        if (actions.length) log(`Team ready — ${actions.length} task(s) awaiting approval`, "success");
+        if (actions.length && !appliedResults?.length) {
+          log(`Team ready — ${actions.length} task(s) awaiting approval`, "success");
+        }
       }
     });
   };
@@ -1031,6 +1083,39 @@ export default function Home() {
         if (!proposals.includes(desc)) proposals = [...proposals, desc];
         pushAgentLive({ proposals: [...proposals] });
       }
+    } else if (type === "reflection_note") {
+      const summary = String(event.summary ?? "");
+      const issues = (event.issues as string[]) ?? [];
+      const detail = issues.length ? `${summary}\n${issues.join("; ")}` : summary;
+      steps = upsertStep(steps, {
+        id: `reflection_${String(event.chapter_id ?? "chapter")}`,
+        label: "Reflection — chapter review",
+        status: "done",
+        detail: detail || "Chapter reviewed",
+      });
+      if (summary) {
+        setAgentLive((prev) => ({
+          ...prev,
+          criticNotes: prev.criticNotes.includes(summary)
+            ? prev.criticNotes
+            : [...prev.criticNotes, summary],
+        }));
+      }
+      ctx.patchAssistant({ steps: [...steps], streaming: true });
+    } else if (type === "trust_apply_start") {
+      setExecuting(true);
+      setPendingActions([]);
+      pushAgentLive({
+        active: true,
+        title: `Trust mode — auto-applying ${event.count ?? "?"} change(s)…`,
+      });
+      steps = upsertStep(steps, {
+        id: "trust_apply",
+        label: "Auto-apply (trust mode)",
+        status: "running",
+        detail: String(event.note ?? ""),
+      });
+      ctx.patchAssistant({ steps: [...steps], streaming: true });
     } else if (type === "critic_note") {
       const note = String(event.content ?? "");
       setAgentLive((prev) => ({
@@ -1059,7 +1144,13 @@ export default function Home() {
       const diff = (event.edit_diff as EditDiff | undefined) ?? null;
       const teamPlan = (event.team_plan as TeamPlanPayload | undefined) ?? undefined;
       const blocked = (event.qa_blocked as QaBlockedAction[]) ?? [];
-      setPendingActions(actions);
+      const appliedResults = event.results as string[] | undefined;
+      if (appliedResults?.length) {
+        setExecuting(false);
+      }
+      if (!appliedResults?.length) {
+        setPendingActions(actions);
+      }
       setQaBlocked(blocked);
       if (diff) {
         setEditDiff(diff);
@@ -1079,7 +1170,9 @@ export default function Home() {
         // keep editorReport on message
       pushAgentLive({
         active: false,
-        title: teamPlan
+        title: appliedResults?.length
+          ? "Applied — check CapCut timeline"
+          : teamPlan
           ? teamPlan.approved_tasks?.length
             ? "Team plan ready — review & approve"
             : "Team finished — no edits queued"
@@ -1104,7 +1197,8 @@ export default function Home() {
     const msg = autoEdit
       ? hint || "Travel vlog — captions, music, transitions"
       : hint;
-    if (!msg || loading || autoEditing) return;
+    const imagesToSend = attachedImages.map((a) => a.base64);
+    if ((!msg && !imagesToSend.length) || loading || autoEditing) return;
     if (!selectedPath) {
       setError("Select a CapCut project in the sidebar first — timeline visuals need project data.");
       return;
@@ -1112,14 +1206,17 @@ export default function Home() {
 
     const userDisplay = autoEdit
       ? `**Auto edit**${hint ? ` — ${hint}` : " — pro full timeline"}`
-      : msg;
+      : msg || "(reference image attached)";
+
+    const userImages = attachedImages.map((a) => a.dataUrl);
 
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: userDisplay },
+      { role: "user", content: userDisplay, images: userImages.length ? userImages : undefined },
       { role: "assistant", content: "", steps: [], proposals: [], editorReport: null, streaming: true },
     ]);
     setInput("");
+    setAttachedImages([]);
     setLoading(true);
     if (autoEdit) setAutoEditing(true);
     setError("");
@@ -1157,10 +1254,12 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: msg,
+          message: msg || "Use the attached reference image(s) to guide this edit.",
           project_path: selectedPath || undefined,
           force_team: teamMode && !autoEdit,
           auto_edit: autoEdit,
+          trust_apply: trustApply,
+          images: imagesToSend.length ? imagesToSend : undefined,
         }),
       });
       if (!res.ok) {
@@ -1357,6 +1456,9 @@ export default function Home() {
           const syncHint = event.capcut_sync_hint ? String(event.capcut_sync_hint) : "";
           if (syncHint) {
             log(syncHint, "info");
+            if (syncHint && !reply.includes(syncHint)) {
+              reply = `${reply}\n\n${syncHint}`;
+            }
           }
           patchApply({ content: reply, steps, streaming: false });
           if (event.queued) {
@@ -1567,6 +1669,16 @@ export default function Home() {
             <p className="text-[11px] text-white/45 mt-0.5">Talk to your timeline — no manual clicking</p>
           </div>
           <label className="ml-auto flex items-center gap-2 text-xs cursor-pointer text-white/70">
+            <input
+              type="checkbox"
+              checked={trustApply}
+              onChange={(e) => setTrustApply(e.target.checked)}
+              className="rounded accent-[#00cbd6]"
+            />
+            <span className="font-medium text-white/85">Trust & apply</span>
+            <span className="text-capcut text-[10px]">Skip approve — auto-apply when QA passes</span>
+          </label>
+          <label className="flex items-center gap-2 text-xs cursor-pointer text-white/70">
             <input
               type="checkbox"
               checked={teamMode}
@@ -1821,7 +1933,21 @@ export default function Home() {
             return (
               <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                 {msg.role === "user" ? (
-                  <div className="max-w-2xl px-4 py-3 text-xs leading-relaxed msg-user">{msg.content}</div>
+                  <div className="max-w-2xl px-4 py-3 text-xs leading-relaxed msg-user space-y-2">
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="flex flex-wrap gap-2 justify-end">
+                        {msg.images.map((src, j) => (
+                          <img
+                            key={j}
+                            src={src}
+                            alt="Attached reference"
+                            className="h-20 w-20 object-cover rounded-lg border border-white/10"
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <div>{msg.content}</div>
+                  </div>
                 ) : (
                   <div className="max-w-3xl w-full msg-assistant px-1 py-1">
                     {isStreamingTeamMessage ? (
@@ -1867,7 +1993,61 @@ export default function Home() {
         </div>
 
         <footer className="p-4 border-t border-white/5 bg-black/20">
+          {attachedImages.length > 0 && (
+            <div className="flex flex-wrap gap-2 max-w-3xl mx-auto mb-2">
+              {attachedImages.map((img) => (
+                <div key={img.id} className="relative">
+                  <img
+                    src={img.dataUrl}
+                    alt="Attach preview"
+                    className="h-14 w-14 object-cover rounded-lg border border-capcut/30"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setAttachedImages((prev) => prev.filter((x) => x.id !== img.id))}
+                    className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-black/80 text-white text-[10px] cursor-pointer"
+                    aria-label="Remove image"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex gap-2 max-w-3xl mx-auto">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = e.target.files;
+                if (!files) return;
+                void (async () => {
+                  const next = [...attachedImages];
+                  for (const file of Array.from(files)) {
+                    if (!file.type.startsWith("image/") || next.length >= 2) continue;
+                    try {
+                      next.push(await readImageFile(file));
+                    } catch {
+                      /* ignore */
+                    }
+                  }
+                  setAttachedImages(next);
+                })();
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading || !connected || attachedImages.length >= 2}
+              className="btn-secondary px-3 py-2.5 text-xs cursor-pointer disabled:opacity-40"
+              title="Attach reference image (max 2)"
+            >
+              📎
+            </button>
             <input
               className="input-field flex-1 px-4 py-2.5 text-xs disabled:opacity-40"
               placeholder={selectedPath ? "Describe your edit…" : "Select a project first"}
@@ -1878,7 +2058,7 @@ export default function Home() {
             />
             <button
               onClick={() => sendMessage()}
-              disabled={loading || !connected || !input.trim()}
+              disabled={loading || !connected || (!input.trim() && !attachedImages.length)}
               className="btn-primary px-5 py-2.5 text-xs cursor-pointer"
             >
               Send

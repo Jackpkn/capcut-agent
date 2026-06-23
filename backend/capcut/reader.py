@@ -90,6 +90,7 @@ def _build_text_overlays(data: dict) -> list[dict]:
 
 def _build_video_clips(data: dict) -> list[dict]:
     materials = _index_materials(data)
+    transitions_by_id = {t["id"]: t for t in data.get("materials", {}).get("transitions", [])}
     clips = []
 
     for track_index, track in enumerate(data.get("tracks", [])):
@@ -98,6 +99,15 @@ def _build_video_clips(data: dict) -> list[dict]:
         for segment in track.get("segments", []):
             video = materials.get(segment.get("material_id", ""), {})
             timerange = segment.get("target_timerange") or {}
+            transition_ids = {
+                ref for ref in segment.get("extra_material_refs", [])
+                if ref in transitions_by_id
+            }
+            transition_name = None
+            if transition_ids:
+                t = transitions_by_id.get(next(iter(transition_ids)))
+                if t:
+                    transition_name = t.get("name")
             clips.append({
                 "index": len(clips) + 1,
                 "segment_id": segment["id"],
@@ -108,6 +118,7 @@ def _build_video_clips(data: dict) -> list[dict]:
                 "speed": segment.get("speed", 1.0),
                 "volume": segment.get("volume", 1.0),
                 "track_index": track_index,
+                "transition": transition_name,
             })
 
     clips.sort(key=lambda c: c["at_sec"])

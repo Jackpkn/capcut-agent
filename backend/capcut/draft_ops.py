@@ -246,8 +246,11 @@ def _apply_via_legacy(project_path: str, op: dict) -> str:
             query=op.get("query"),
             duration_us=_sec_to_us(op["duration_sec"]) if op.get("duration_sec") else None,
         )
-        if result.get("skipped"):
-            return f'Transition already on clip — skipped'
+        if result.get("unchanged"):
+            return f'Transition "{result["name"]}" already on clip'
+        if result.get("replaced"):
+            old = result.get("replaced_name") or "previous transition"
+            return f'Replaced "{old}" with "{result["name"]}"'
         return f'Added transition "{result["name"]}"'
 
     if name == "effect.add":

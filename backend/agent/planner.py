@@ -79,7 +79,7 @@ def run_planner(
 
     if not llm_available():
         return [], [
-            "AI planner unavailable. Set GROQ_API_KEY and/or GEMINI_API_KEY and retry — "
+            "AI planner unavailable. Start Ollama (gemma4) and/or set GEMINI_API_KEY and retry — "
             "no scripted fallback is used.",
         ]
 

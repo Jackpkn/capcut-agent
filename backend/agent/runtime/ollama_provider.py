@@ -181,6 +181,15 @@ def _messages_for_ollama_client(messages: list[dict]) -> list[dict]:
             continue
         if role in ("system", "user", "assistant"):
             content = m.get("content")
+            images = m.get("images")
+            if role == "user" and images:
+                entry: dict = {"role": "user", "images": images}
+                if content is not None:
+                    entry["content"] = content
+                else:
+                    entry["content"] = " "
+                out.append(entry)
+                continue
             if content is not None:
                 out.append({"role": role, "content": content})
     return out
@@ -331,6 +340,11 @@ def _input_items_to_messages(
         if role in ("user", "assistant"):
             flush_calls()
             content = item.get("content") or ""
+            images = item.get("images")
+            if role == "user" and images:
+                entry: dict = {"role": "user", "images": images, "content": content or " "}
+                messages.append(entry)
+                continue
             if content:
                 if role == "assistant":
                     content = _visible_answer_text(content)

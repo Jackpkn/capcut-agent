@@ -9,6 +9,7 @@ from agent.runtime.llm import (
     llm_available,
     ollama_available,
     provider_order,
+    provider_order_for_tools,
     stream_model_text,
 )
 from agent.runtime.ollama_provider import list_ollama_models, resolve_ollama_model
@@ -21,6 +22,7 @@ __all__ = [
     "ollama_available",
     "llm_available",
     "provider_order",
+    "provider_order_for_tools",
     "list_ollama_models",
     "resolve_ollama_model",
 ]

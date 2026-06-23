@@ -6,28 +6,12 @@ import json
 import logging
 from dataclasses import dataclass
 
+from agent.prompts import ORCHESTRATOR_INSTRUCTIONS
+from agent.routing_hints import attached_image_wants_answer_only, full_edit_wants_auto_team
 from agent.runtime.model import call_model, llm_available
 from agent.streaming import EventEmitter, step as emit_step
 
 logger = logging.getLogger(__name__)
-
-ORCHESTRATOR_INSTRUCTIONS = """You are the CapCut orchestrator. Read the human message (any language) and project snapshot.
-You MUST call route_request exactly once — plain text replies are not accepted.
-
-## Modes
-- **answer**: Greetings, questions, inspection, advice, timeline **visuals**, project scan. No timeline writes.
-- **edit**: One focused change (add transition, fix caption, music, speed one clip) → mode=edit.
-- **team**: Large multi-area re-edit (pacing + music + captions across many clips).
-  Team agents work **one after another** on the same timeline (never parallel).
-
-## Routing judgment (your call — no code shortcuts)
-- Casual chat or thanks with no edit ask → **answer**
-- **Analyze, review, suggest improvements, feedback, or "how can I improve"** → **answer** (advice only — no timeline writes unless they explicitly ask you to apply changes)
-- Style/vibe requests on **short** timelines (few clips, low duration_sec) → **edit** (single agent is enough)
-- **team** only for long multi-chapter re-edits or explicit "re-edit everything" scope
-- In `reason`, summarize the **user's actual words** — never copy example phrases from these instructions
-
-Set ui_label to a short phrase for the UI."""
 
 ROUTE_TOOL = [{
     "type": "function",
@@ -59,6 +43,7 @@ class RouteDecision:
     mode: str
     reason: str
     ui_label: str
+    auto_edit: bool = False
 
 
 def _parse_route(response) -> RouteDecision | None:
@@ -144,6 +129,7 @@ def decide_route(
     *,
     force_team: bool = False,
     auto_edit: bool = False,
+    attached_images: int = 0,
     emit: EventEmitter | None = None,
 ) -> RouteDecision:
     if not project_path:
@@ -165,6 +151,29 @@ def decide_route(
                 "(pacing, music, captions, transitions)."
             ),
             ui_label="Auto edit (pro)",
+        )
+
+    if attached_image_wants_answer_only(message, attached_images):
+        emit_step(
+            emit, "orchestrator", "Image analysis", "done",
+            "Describe the attached reference — no timeline edits.",
+        )
+        return RouteDecision(
+            mode="answer",
+            reason="You attached a reference image to view or analyze.",
+            ui_label="Image analysis",
+        )
+
+    if full_edit_wants_auto_team(message) and not force_team:
+        emit_step(
+            emit, "orchestrator", "Auto edit (pro)", "done",
+            "Full-video brief — Director plans all chapters, one approve.",
+        )
+        return RouteDecision(
+            mode="team",
+            reason="Multi-area edit request — running hierarchical auto edit.",
+            ui_label="Auto edit (pro)",
+            auto_edit=True,
         )
 
     parsed: RouteDecision | None = None

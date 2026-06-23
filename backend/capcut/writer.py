@@ -286,6 +286,48 @@ def _segment_template(data: dict, track_type: str) -> dict | None:
     return None
 
 
+def _transition_ids_on_segment(data: dict, seg: dict) -> list[str]:
+    transition_ids = {t["id"] for t in data["materials"].get("transitions", [])}
+    return [ref for ref in seg.get("extra_material_refs", []) if ref in transition_ids]
+
+
+def _existing_transition_on_segment(data: dict, seg: dict) -> dict | None:
+    for tid in _transition_ids_on_segment(data, seg):
+        for t in data["materials"].get("transitions", []):
+            if t["id"] == tid:
+                return t
+    return None
+
+
+def _remove_segment_transitions(data: dict, seg: dict) -> list[str]:
+    transition_ids = {t["id"] for t in data["materials"].get("transitions", [])}
+    refs = seg.get("extra_material_refs", [])
+    removed = [r for r in refs if r in transition_ids]
+    seg["extra_material_refs"] = [r for r in refs if r not in transition_ids]
+    if removed:
+        referenced = {
+            ref
+            for track in data.get("tracks", [])
+            for s in track.get("segments", [])
+            for ref in s.get("extra_material_refs", [])
+        }
+        data["materials"]["transitions"] = [
+            t for t in data["materials"].get("transitions", [])
+            if t["id"] in referenced
+        ]
+    return removed
+
+
+def _transition_search_terms(query: str) -> list[str]:
+    q = query.lower().strip()
+    terms = [q]
+    if "dissolve" in q:
+        terms.extend(["blur", "mix", "fade", "fade out"])
+    elif "fade" in q:
+        terms.extend(["fade out", "pull out"])
+    return list(dict.fromkeys(terms))
+
+
 def _match_catalog_hit(hits: list[dict], query_str: str) -> dict | None:
     if not hits:
         return None
@@ -300,8 +342,20 @@ def _match_catalog_hit(hits: list[dict], query_str: str) -> dict | None:
 def _catalog_fallback_asset(params: dict, asset_type: str, *, limit: int) -> dict | None:
     from capcut.catalog import search_catalog
 
-    hits = search_catalog("", asset_type, limit=limit)
     query_str = (params.get("query") or params.get("name") or "").lower()
+    hits: list[dict] = []
+    if query_str:
+        search_terms = (
+            _transition_search_terms(query_str)
+            if asset_type == "transition"
+            else [query_str]
+        )
+        for term in search_terms:
+            hits = search_catalog(term, asset_type, limit=limit)
+            if hits:
+                break
+    if not hits:
+        hits = search_catalog("", asset_type, limit=limit)
     asset = _match_catalog_hit(hits, query_str)
     if asset:
         logger.warning(
@@ -377,6 +431,36 @@ def add_transition(
             "task_id": "",
         }
 
+    seg = _find_segment(data, segment_id)
+    if not seg:
+        raise ValueError(f"Video segment not found: {segment_id}")
+
+    target_dur = duration_us or asset.get("duration_us") or template.get("duration") or 66666
+    existing = _existing_transition_on_segment(data, seg)
+    if existing:
+        same_asset = str(existing.get("resource_id")) == str(asset["resource_id"])
+        same_name = (existing.get("name") or "").lower() == (asset["name"] or "").lower()
+        if same_asset or same_name:
+            if duration_us and existing.get("duration") != duration_us:
+                existing["duration"] = duration_us
+                write_project(project_path, data)
+                return {
+                    "transition_id": existing["id"],
+                    "name": asset["name"],
+                    "segment_id": segment_id,
+                    "updated": True,
+                }
+            return {
+                "transition_id": existing["id"],
+                "name": existing.get("name") or asset["name"],
+                "segment_id": segment_id,
+                "unchanged": True,
+            }
+        old_name = existing.get("name") or "transition"
+        _remove_segment_transitions(data, seg)
+    else:
+        old_name = None
+
     transition_id = _new_id()
     material = copy.deepcopy(template)
     material.update({
@@ -386,19 +470,17 @@ def add_transition(
         "effect_id": asset["resource_id"],
         "resource_id": asset["resource_id"],
         "third_resource_id": asset["resource_id"],
-        "duration": duration_us or asset.get("duration_us") or template.get("duration") or 66666,
+        "duration": target_dur,
     })
     data["materials"].setdefault("transitions", []).append(material)
-
-    seg = _find_segment(data, segment_id)
-    if not seg:
-        raise ValueError(f"Video segment not found: {segment_id}")
-    if _segment_has_transition(data, seg):
-        return {"transition_id": None, "name": asset["name"], "segment_id": segment_id, "skipped": True}
     _attach_transition_ref(seg, transition_id)
 
     write_project(project_path, data)
-    return {"transition_id": transition_id, "name": asset["name"], "segment_id": segment_id}
+    result = {"transition_id": transition_id, "name": asset["name"], "segment_id": segment_id}
+    if existing:
+        result["replaced"] = True
+        result["replaced_name"] = old_name
+    return result
 
 
 def add_effect(
@@ -1404,3 +1486,319 @@ def reorder_clips(project_path: str, segment_id_a: str, segment_id_b: str):
     seg_b["target_timerange"]["start"] = a_start
     write_project(project_path, data)
     return data
+
+
+COLOR_PRESET_QUERIES: dict[str, str] = {
+    "cinematic": "cinematic film",
+    "warm": "warm tone",
+    "cool": "cool blue",
+    "vintage": "vintage",
+    "vivid": "vivid",
+    "teal_orange": "teal orange",
+    "moody": "moody dark",
+}
+
+
+def split_clip(project_path: str, segment_id: str, at_sec: float) -> str:
+    from capcut.draft_ops import apply_draft_operations
+
+    results = apply_draft_operations(
+        project_path,
+        [{"op": "segment.split", "segment_id": segment_id, "at_sec": at_sec}],
+    )
+    return results[0] if results else f"Split clip at {at_sec}s"
+
+
+def duck_audio(
+    project_path: str,
+    music_segment_id: str | None = None,
+    volume: float = 0.2,
+) -> dict:
+    """Lower background music volume under all speech/voiceover segments dynamically."""
+    from capcut.writer import write_project
+
+    data = read_project(project_path)
+    
+    # 1. Find the music track
+    music_track = None
+    if music_segment_id:
+        for track in data.get("tracks", []):
+            if track.get("type") == "audio":
+                for seg in track.get("segments", []):
+                    if seg.get("id") == music_segment_id:
+                        music_track = track
+                        break
+    if not music_track:
+        # Find audio track with maximum total segment duration
+        best_track = None
+        max_dur = -1.0
+        for track in data.get("tracks", []):
+            if track.get("type") == "audio":
+                total_dur = 0.0
+                for seg in track.get("segments", []):
+                    dur_us = seg.get("target_timerange", {}).get("duration", 0)
+                    total_dur += dur_us / 1_000_000
+                if total_dur > max_dur:
+                    max_dur = total_dur
+                    best_track = track
+        music_track = best_track
+
+    if not music_track or not music_track.get("segments"):
+        raise ValueError("No audio/music segments found to duck")
+
+    # 2. Collect speech intervals (text overlays and non-music audio segments)
+    speech_intervals = []
+    for track in data.get("tracks", []):
+        if track is music_track:
+            continue
+        if track.get("type") == "text":
+            for seg in track.get("segments", []):
+                target = seg.get("target_timerange") or {}
+                start = target.get("start", 0) / 1_000_000
+                dur = target.get("duration", 0) / 1_000_000
+                if dur > 0:
+                    speech_intervals.append((start, start + dur))
+        elif track.get("type") == "audio":
+            for seg in track.get("segments", []):
+                target = seg.get("target_timerange") or {}
+                start = target.get("start", 0) / 1_000_000
+                dur = target.get("duration", 0) / 1_000_000
+                if dur > 0:
+                    speech_intervals.append((start, start + dur))
+
+    # 3. Merge close/overlapping speech intervals (gap threshold = 1.0s)
+    speech_intervals.sort(key=lambda x: x[0])
+    merged_intervals = []
+    for start, end in speech_intervals:
+        if not merged_intervals:
+            merged_intervals.append((start, end))
+        else:
+            prev_start, prev_end = merged_intervals[-1]
+            if start <= prev_end + 1.0:
+                merged_intervals[-1] = (prev_start, max(prev_end, end))
+            else:
+                merged_intervals.append((start, end))
+
+    # 4. Collect split times (starts and ends of merged speech intervals)
+    split_times = set()
+    for start, end in merged_intervals:
+        split_times.add(start)
+        split_times.add(end)
+
+    sorted_splits = sorted(list(split_times))
+
+    # 5. Split music segments at boundary times in memory
+    for split_sec in sorted_splits:
+        split_us = int(split_sec * 1_000_000)
+        target_idx = -1
+        for idx, seg in enumerate(music_track.get("segments", [])):
+            target = seg.get("target_timerange") or {}
+            seg_start = int(target.get("start", 0))
+            seg_dur = int(target.get("duration", 0))
+            if seg_start < split_us < seg_start + seg_dur:
+                target_idx = idx
+                break
+        if target_idx != -1:
+            seg = music_track["segments"][target_idx]
+            target = seg.get("target_timerange") or {}
+            source = seg.get("source_timerange") or {}
+            seg_start = int(target.get("start", 0))
+            seg_dur = int(target.get("duration", 0))
+            
+            speed = float(seg.get("speed") or 1.0)
+            src_start = int(source.get("start", 0))
+            src_dur = int(source.get("duration", seg_dur))
+            
+            rel_split_us = split_us - seg_start
+            
+            # Modify target/source duration on original segment
+            seg["target_timerange"]["duration"] = rel_split_us
+            if "source_timerange" in seg:
+                seg["source_timerange"]["duration"] = int(rel_split_us * speed)
+                
+            # Create second segment
+            new_seg = copy.deepcopy(seg)
+            new_seg["id"] = str(uuid.uuid4())
+            new_seg["target_timerange"] = {
+                "start": seg_start + rel_split_us,
+                "duration": seg_dur - rel_split_us,
+            }
+            if "source_timerange" in new_seg:
+                new_seg["source_timerange"] = {
+                    "start": src_start + int(rel_split_us * speed),
+                    "duration": src_dur - int(rel_split_us * speed),
+                }
+            music_track["segments"].insert(target_idx + 1, new_seg)
+
+    # 6. Apply target ducking volume to overlapping segments, reset others to 1.0
+    ducked_segment_ids = []
+    for seg in music_track.get("segments", []):
+        target = seg.get("target_timerange") or {}
+        seg_start = int(target.get("start", 0))
+        seg_dur = int(target.get("duration", 0))
+        mid = (seg_start + seg_dur / 2.0) / 1_000_000
+        
+        is_overlapping = False
+        for start, end in merged_intervals:
+            if start <= mid <= end:
+                is_overlapping = True
+                break
+                
+        if is_overlapping:
+            seg["volume"] = volume
+            seg["last_nonzero_volume"] = volume
+            ducked_segment_ids.append(seg["id"])
+        else:
+            seg["volume"] = 1.0
+
+    write_project(project_path, data)
+    return {
+        "segment_id": music_segment_id or (music_track["segments"][0]["id"] if music_track.get("segments") else None),
+        "volume": volume,
+        "ducked_segments": len(ducked_segment_ids)
+    }
+
+
+def apply_color_preset(
+    project_path: str,
+    preset: str,
+    start_sec: float = 0,
+    duration_sec: float | None = None,
+    bind_segment_id: str | None = None,
+) -> dict:
+    from capcut.reader import get_project_summary
+
+    key = preset.lower().replace(" ", "_").replace("-", "_")
+    query = COLOR_PRESET_QUERIES.get(key, preset)
+    summary = get_project_summary(project_path)
+    dur = duration_sec or summary.get("overview", {}).get("duration_sec") or 30.0
+    return add_effect(
+        project_path,
+        query=query,
+        start_sec=start_sec,
+        duration_sec=dur,
+        bind_segment_id=bind_segment_id,
+    )
+
+
+def add_generated_image(
+    project_path: str,
+    image_path: str,
+    start_sec: float = 0,
+    duration_sec: float = 3.0,
+) -> dict:
+    """Insert a local image as a photo clip on the video track."""
+    data = read_project(project_path)
+    videos = data.get("materials", {}).get("videos", [])
+    blueprint = videos[0] if videos else {
+        "type": "photo",
+        "width": 1080,
+        "height": 1920,
+        "category_name": "local",
+        "check_flag": 1,
+        "source": 0,
+        "source_platform": 0,
+    }
+
+    abs_path = str(Path(image_path).resolve())
+    material_id = _new_id()
+    segment_id = _new_id()
+    duration_us = int(duration_sec * 1_000_000)
+    start_us = int(start_sec * 1_000_000)
+
+    material = copy.deepcopy(blueprint)
+    material.update({
+        "id": material_id,
+        "type": "photo",
+        "path": abs_path,
+        "material_name": Path(image_path).name,
+        "duration": duration_us,
+    })
+    data["materials"].setdefault("videos", []).append(material)
+
+    seg_template = _segment_template(data, "video") or {
+        "visible": True,
+        "speed": 1.0,
+        "volume": 1.0,
+        "extra_material_refs": [],
+        "clip": {"alpha": 1.0, "scale": {"x": 1.0, "y": 1.0}},
+    }
+    segment = copy.deepcopy(seg_template)
+    segment.update({
+        "id": segment_id,
+        "material_id": material_id,
+        "target_timerange": {"start": start_us, "duration": duration_us},
+        "source_timerange": {"start": 0, "duration": duration_us},
+    })
+
+    video_track = next((t for t in data["tracks"] if t.get("type") == "video"), None)
+    if not video_track:
+        video_track = {"type": "video", "segments": [], "attribute": 0}
+        data["tracks"].append(video_track)
+    video_track["segments"].append(segment)
+    write_project(project_path, data)
+    return {"name": Path(image_path).name, "segment_id": segment_id, "at_sec": start_sec}
+
+
+def sync_video_to_beats(
+    project_path: str,
+    bpm: float = 120.0,
+    beat_interval: float | None = None,
+) -> dict:
+    """Align video segment transitions (ends) to background music beats."""
+    from capcut.writer import write_project
+
+    data = read_project(project_path)
+    
+    # 1. Find the main video track
+    video_track = None
+    for track in data.get("tracks", []):
+        if track.get("type") == "video":
+            video_track = track
+            break
+            
+    if not video_track or not video_track.get("segments"):
+        raise ValueError("No video clips found to sync")
+
+    # 2. Determine beat interval
+    interval = beat_interval
+    if interval is None:
+        interval = 60.0 / bpm
+
+    # 3. Align segments
+    segments = video_track["segments"]
+    new_start = segments[0]["target_timerange"]["start"] / 1_000_000
+    
+    aligned_count = 0
+    for seg in segments:
+        target = seg.get("target_timerange") or {}
+        orig_dur = target.get("duration", 0) / 1_000_000
+        orig_end = new_start + orig_dur
+        
+        # Round to nearest beat interval
+        beat_idx = round(orig_end / interval)
+        new_end = beat_idx * interval
+        
+        # Minimum duration of 0.2s
+        if new_end <= new_start + 0.2:
+            new_end = new_start + 0.2
+            
+        new_dur = new_end - new_start
+        
+        seg["target_timerange"]["start"] = int(new_start * 1_000_000)
+        seg["target_timerange"]["duration"] = int(new_dur * 1_000_000)
+        
+        speed = float(seg.get("speed") or 1.0)
+        if "source_timerange" in seg:
+            seg["source_timerange"]["duration"] = int(new_dur * 1_000_000 * speed)
+            
+        new_start = new_end
+        aligned_count += 1
+
+    write_project(project_path, data)
+    return {
+        "aligned_clips": aligned_count,
+        "beat_interval": interval,
+        "bpm": round(60.0 / interval, 2)
+    }
+

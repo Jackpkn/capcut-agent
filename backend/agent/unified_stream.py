@@ -24,15 +24,48 @@ def iter_unified_sse(
     *,
     force_team: bool = False,
     auto_edit: bool = False,
+    images: list[str] | None = None,
+    trust_apply: bool = False,
 ) -> Iterator[str]:
     human_hint = message.strip()
     agent_message = build_auto_edit_message(human_hint) if auto_edit else human_hint
+
+    vision_b64: list[str] = []
+    working_message = agent_message
+    if images:
+        from agent.streaming import step as emit_step
+
+        yield sse_line({
+            "type": "step",
+            "id": "user_images",
+            "status": "running",
+            "label": "Analyzing attached image(s)…",
+        })
+        from agent.user_images import enrich_user_message
+
+        working_message, vision_b64 = enrich_user_message(agent_message, images)
+        if vision_b64:
+            yield sse_line({
+                "type": "step",
+                "id": "user_images",
+                "status": "done",
+                "label": f"Attached {len(vision_b64)} reference image(s)",
+            })
+        else:
+            yield sse_line({
+                "type": "step",
+                "id": "user_images",
+                "status": "error",
+                "label": "Could not read attached image(s)",
+                "detail": "Use JPEG or PNG under 3MB",
+            })
 
     log_agent(
         "stream start",
         auto_edit=auto_edit,
         force_team=force_team,
-        msg_preview=agent_message[:80],
+        msg_preview=working_message[:80],
+        images=len(vision_b64),
     )
 
     if project_path:
@@ -85,11 +118,12 @@ def iter_unified_sse(
         with box_lock:
             timeline_val = preload_box.get("timeline") or {}
         route_decision = decide_route(
-            agent_message,
+            working_message,
             timeline_val,
             project_path,
             force_team=force_team,
             auto_edit=auto_edit,
+            attached_images=len(vision_b64),
             emit=lambda ev: route_q.put(ev),
         )
         with box_lock:
@@ -135,6 +169,8 @@ def iter_unified_sse(
         return
 
     if route.mode == "team" and project_path:
+        session_message = working_message
+        use_auto_edit = auto_edit or route.auto_edit
         clips = load_project_intelligence(project_path)
         if not clips:
             log_agent("clip understand", clips="running (cache miss)")
@@ -143,16 +179,22 @@ def iter_unified_sse(
                 if event.get("type") == "understand_done":
                     clips = event.get("clips") or []
             set_clip_intelligence_context(clips)
-        session = start_session(project_path, agent_message, auto_edit=auto_edit)
+        session = start_session(
+            project_path,
+            session_message,
+            auto_edit=use_auto_edit,
+            trust_apply=trust_apply,
+        )
         log_agent("team session started", session_id=session.id, clips_understood=len(clips))
         yield sse_line({
             "type": "workflow",
             "workflow": "team",
             "session_id": session.id,
-            "auto_edit": auto_edit,
+            "auto_edit": use_auto_edit,
+            "trust_apply": trust_apply,
             "note": (
                 "Auto edit — Director → all chapters → one approve."
-                if auto_edit
+                if use_auto_edit
                 else "Specialists run one-by-one on the same timeline (not parallel)."
             ),
         })
@@ -170,10 +212,13 @@ def iter_unified_sse(
         summary_val = preload_box.get("project_summary")
 
     for line in iter_agent_sse(
-        message,
+        working_message,
         project_path,
         answer_only=(route.mode == "answer"),
         project_summary=summary_val,
+        images=vision_b64 or None,
+        preprocessed_images=bool(vision_b64),
+        trust_apply=trust_apply,
     ):
         payload = line.removeprefix("data: ").strip()
         if payload:
