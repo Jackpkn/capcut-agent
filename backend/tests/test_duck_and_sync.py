@@ -295,3 +295,187 @@ def test_multimodal_subtitle_style_matching(monkeypatch):
     # Size should be large (24)
     assert style["size"] == 24
 
+
+def test_set_audio_fade(monkeypatch):
+    from capcut.writer import set_audio_fade
+
+    mock_data = {
+        "tracks": [
+            {
+                "id": "audio_track_id",
+                "type": "audio",
+                "segments": [
+                    {
+                        "id": "audio_seg_fade_1",
+                        "target_timerange": {"start": 0, "duration": 5_000_000},
+                        "source_timerange": {"start": 0, "duration": 5_000_000},
+                        "speed": 1.0,
+                    }
+                ]
+            }
+        ],
+        "materials": {}
+    }
+
+    saved_data = {}
+
+    def mock_read(path):
+        return copy.deepcopy(mock_data)
+
+    def mock_write(path, data):
+        nonlocal saved_data
+        saved_data = data
+        return True
+
+    monkeypatch.setattr("capcut.writer.read_project", mock_read)
+    monkeypatch.setattr("capcut.writer.write_project", mock_write)
+
+    res = set_audio_fade("/fake/project/path", "audio_seg_fade_1", fade_in_sec=1.5, fade_out_sec=2.0)
+    assert res["segment_id"] == "audio_seg_fade_1"
+    assert res["fade_in_sec"] == 1.5
+    assert res["fade_out_sec"] == 2.0
+
+    # Verify write
+    assert "audio_fades" in saved_data["materials"]
+    assert len(saved_data["materials"]["audio_fades"]) == 1
+    fade_item = saved_data["materials"]["audio_fades"][0]
+    assert fade_item["fade_in_duration"] == 1_500_000
+    assert fade_item["fade_out_duration"] == 2_000_000
+    assert fade_item["type"] == "audio_fade"
+
+    segments = saved_data["tracks"][0]["segments"]
+    assert segments[0]["audio_fade"] == fade_item["id"]
+
+
+def test_fade_project_music(monkeypatch):
+    from capcut.writer import fade_project_music
+
+    mock_data = {
+        "tracks": [
+            {
+                "id": "audio_track_id",
+                "type": "audio",
+                "segments": [
+                    {
+                        "id": "music_seg_1",
+                        "target_timerange": {"start": 0, "duration": 5_000_000},
+                    },
+                    {
+                        "id": "music_seg_2",
+                        "target_timerange": {"start": 5_000_000, "duration": 5_000_000},
+                    }
+                ]
+            }
+        ],
+        "materials": {}
+    }
+
+    saved_data = {}
+
+    def mock_read(path):
+        return copy.deepcopy(mock_data)
+
+    def mock_write(path, data):
+        nonlocal saved_data
+        saved_data = data
+        return True
+
+    monkeypatch.setattr("capcut.writer.read_project", mock_read)
+    monkeypatch.setattr("capcut.writer.write_project", mock_write)
+
+    res = fade_project_music("/fake/project/path", fade_in_sec=2.0, fade_out_sec=3.0)
+    assert res["fade_in_sec"] == 2.0
+    assert res["fade_out_sec"] == 3.0
+    assert res["track_id"] == "audio_track_id"
+
+    # Verify write
+    assert "audio_fades" in saved_data["materials"]
+    fades = saved_data["materials"]["audio_fades"]
+    assert len(fades) == 2
+
+    # First segment: fade-in
+    first_seg = saved_data["tracks"][0]["segments"][0]
+    fade_in_id = first_seg["audio_fade"]
+    fade_in_obj = next(f for f in fades if f["id"] == fade_in_id)
+    assert fade_in_obj["fade_in_duration"] == 2_000_000
+    assert fade_in_obj["fade_out_duration"] == 0
+
+    # Last segment: fade-out
+    last_seg = saved_data["tracks"][0]["segments"][-1]
+    fade_out_id = last_seg["audio_fade"]
+    fade_out_obj = next(f for f in fades if f["id"] == fade_out_id)
+    assert fade_out_obj["fade_in_duration"] == 0
+    assert fade_out_obj["fade_out_duration"] == 3_000_000
+
+
+def test_apply_audio_crossfades(monkeypatch):
+    from capcut.writer import apply_audio_crossfades
+
+    mock_data = {
+        "tracks": [
+            {
+                "id": "audio_track_id",
+                "type": "audio",
+                "segments": [
+                    {
+                        "id": "music_seg_1",
+                        "target_timerange": {"start": 0, "duration": 5_000_000},
+                    },
+                    {
+                        "id": "music_seg_2",
+                        "target_timerange": {"start": 5_000_000, "duration": 5_000_000},
+                    },
+                    {
+                        "id": "music_seg_3",
+                        "target_timerange": {"start": 10_000_000, "duration": 5_000_000},
+                    }
+                ]
+            }
+        ],
+        "materials": {}
+    }
+
+    saved_data = {}
+
+    def mock_read(path):
+        return copy.deepcopy(mock_data)
+
+    def mock_write(path, data):
+        nonlocal saved_data
+        saved_data = data
+        return True
+
+    monkeypatch.setattr("capcut.writer.read_project", mock_read)
+    monkeypatch.setattr("capcut.writer.write_project", mock_write)
+
+    res = apply_audio_crossfades("/fake/project/path", crossfade_sec=1.5)
+    assert res["crossfades_applied"] == 2
+    assert res["crossfade_sec"] == 1.5
+
+    # Verify write
+    assert "audio_fades" in saved_data["materials"]
+    fades = saved_data["materials"]["audio_fades"]
+    assert len(fades) == 4
+
+    segments = saved_data["tracks"][0]["segments"]
+
+    # seg_1 should have a fade-out of 1.5s
+    seg_1_fade_id = segments[0]["audio_fade"]
+    seg_1_fade = next(f for f in fades if f["id"] == seg_1_fade_id)
+    assert seg_1_fade["fade_in_duration"] == 0
+    assert seg_1_fade["fade_out_duration"] == 1_500_000
+
+    # seg_2 gets replaced in the second iteration when it's curr_seg, so check:
+    # it gets a fade-out for boundary 2 (seg_2 -> seg_3)
+    seg_2_fade_id = segments[1]["audio_fade"]
+    seg_2_fade = next(f for f in fades if f["id"] == seg_2_fade_id)
+    assert seg_2_fade["fade_in_duration"] == 0
+    assert seg_2_fade["fade_out_duration"] == 1_500_000
+
+    # seg_3 gets a fade-in of 1.5s
+    seg_3_fade_id = segments[2]["audio_fade"]
+    seg_3_fade = next(f for f in fades if f["id"] == seg_3_fade_id)
+    assert seg_3_fade["fade_in_duration"] == 1_500_000
+    assert seg_3_fade["fade_out_duration"] == 0
+
+

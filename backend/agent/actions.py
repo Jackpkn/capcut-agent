@@ -194,6 +194,12 @@ def describe_action(action: str, params: dict) -> str:
     if action == "sync_video_to_beats":
         bpm = params.get("bpm", 120.0)
         return f"Sync video clip boundaries to music cuts ({bpm} BPM)"
+    if action == "set_audio_fade":
+        return f"Set fade duration for clip {params.get('segment_id', '')[:8]}… (in: {params.get('fade_in_sec', 0)}s, out: {params.get('fade_out_sec', 0)}s)"
+    if action == "fade_project_music":
+        return f"Fade project background music (in: {params.get('fade_in_sec', 2.0)}s, out: {params.get('fade_out_sec', 3.0)}s)"
+    if action == "apply_audio_crossfades":
+        return f"Crossfade adjacent audio clips on background music track ({params.get('crossfade_sec', 1.0)}s)"
     if action == "apply_color_preset":
         return f'Apply color preset "{params.get("preset", "")}"'
     if action == "generate_video_clip":
@@ -539,6 +545,33 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
             beat_interval=params.get("beat_interval"),
         )
         return f"Aligned {result['aligned_clips']} video clips to beats at {result['bpm']} BPM"
+
+    if action == "set_audio_fade":
+        from capcut.writer import set_audio_fade
+        result = set_audio_fade(
+            project_path,
+            segment_id=params["segment_id"],
+            fade_in_sec=float(params.get("fade_in_sec", 0.0)),
+            fade_out_sec=float(params.get("fade_out_sec", 0.0)),
+        )
+        return f"Applied fade properties to audio segment {result['segment_id'][:8]}…"
+
+    if action == "fade_project_music":
+        from capcut.writer import fade_project_music
+        result = fade_project_music(
+            project_path,
+            fade_in_sec=float(params.get("fade_in_sec", 2.0)),
+            fade_out_sec=float(params.get("fade_out_sec", 3.0)),
+        )
+        return f"Applied fade-in ({result['fade_in_sec']}s) and fade-out ({result['fade_out_sec']}s) to project music track"
+
+    if action == "apply_audio_crossfades":
+        from capcut.writer import apply_audio_crossfades
+        result = apply_audio_crossfades(
+            project_path,
+            crossfade_sec=float(params.get("crossfade_sec", 1.0)),
+        )
+        return f"Applied crossfades to {result['crossfades_applied']} audio boundary cuts"
 
     if action == "apply_color_preset":
         from capcut.writer import apply_color_preset

@@ -101,6 +101,9 @@ AUDIO_TOOLS = {
     "propose_update_volume",
     "propose_add_music",
     "propose_replace_music",
+    "propose_set_audio_fade",
+    "propose_fade_project_music",
+    "propose_apply_audio_crossfades",
     "search_library",
     "get_director_picks",
 }

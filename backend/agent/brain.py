@@ -442,6 +442,49 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "propose_set_audio_fade",
+            "description": "Propose custom audio fade-in/fade-out durations for a specific audio segment.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "segment_id": {"type": "string", "description": "ID of the audio segment to modify"},
+                    "fade_in_sec": {"type": "number", "description": "Fade-in duration in seconds"},
+                    "fade_out_sec": {"type": "number", "description": "Fade-out duration in seconds"},
+                },
+                "required": ["segment_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_fade_project_music",
+            "description": "Propose project-wide music fading (fade-in at start, fade-out at end).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fade_in_sec": {"type": "number", "description": "Fade-in duration in seconds (default 2.0)"},
+                    "fade_out_sec": {"type": "number", "description": "Fade-out duration in seconds (default 3.0)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_apply_audio_crossfades",
+            "description": "Propose crossfades on music clip boundaries for adjacent segments on the music track.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "crossfade_sec": {"type": "number", "description": "Crossfade duration in seconds (default 1.0)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_apply_color_preset",
             "description": (
                 "Propose a color grade / filter preset across the timeline or a clip. "
@@ -612,6 +655,9 @@ PROPOSE_TO_ACTION = {
     "propose_split_clip": "split_clip",
     "propose_duck_audio": "duck_audio",
     "propose_sync_video_to_beats": "sync_video_to_beats",
+    "propose_set_audio_fade": "set_audio_fade",
+    "propose_fade_project_music": "fade_project_music",
+    "propose_apply_audio_crossfades": "apply_audio_crossfades",
     "propose_apply_color_preset": "apply_color_preset",
     "propose_generate_image": "generate_image",
     "propose_generate_video_clip": "generate_video_clip",

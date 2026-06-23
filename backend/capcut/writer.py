@@ -1927,3 +1927,160 @@ def sync_video_to_beats(
         "peak_count": len(peaks)
     }
 
+
+def set_audio_fade(
+    project_path: str,
+    segment_id: str,
+    fade_in_sec: float = 0.0,
+    fade_out_sec: float = 0.0,
+) -> dict:
+    """Set audio fade-in/fade-out properties for a specific audio segment."""
+    from capcut.writer import write_project
+    import uuid
+    data = read_project(project_path)
+    
+    seg = _find_segment(data, segment_id)
+    if not seg:
+        raise ValueError(f"Audio segment not found: {segment_id}")
+
+    fade_id = str(uuid.uuid4())
+    fade_obj = {
+        "id": fade_id,
+        "fade_in_duration": int(fade_in_sec * 1_000_000),
+        "fade_out_duration": int(fade_out_sec * 1_000_000),
+        "type": "audio_fade"
+    }
+    if "audio_fades" not in data["materials"]:
+        data["materials"]["audio_fades"] = []
+    data["materials"]["audio_fades"].append(fade_obj)
+    
+    seg["audio_fade"] = fade_id
+    write_project(project_path, data)
+    return {
+        "segment_id": segment_id,
+        "fade_in_sec": fade_in_sec,
+        "fade_out_sec": fade_out_sec,
+    }
+
+
+def fade_project_music(
+    project_path: str,
+    fade_in_sec: float = 2.0,
+    fade_out_sec: float = 3.0,
+) -> dict:
+    """Automatically fade-in the project music start, and fade-out at the end."""
+    from capcut.writer import write_project
+    import uuid
+    data = read_project(project_path)
+    
+    music_track = None
+    max_dur = -1.0
+    for track in data.get("tracks", []):
+        if track.get("type") == "audio":
+            total_dur = 0.0
+            for seg in track.get("segments", []):
+                dur_us = seg.get("target_timerange", {}).get("duration", 0)
+                total_dur += dur_us / 1_000_000
+            if total_dur > max_dur:
+                max_dur = total_dur
+                music_track = track
+
+    if not music_track or not music_track.get("segments"):
+        raise ValueError("No audio/music track found to fade")
+        
+    segments = music_track["segments"]
+    
+    first_seg = segments[0]
+    fade_id_in = str(uuid.uuid4())
+    fade_obj_in = {
+        "id": fade_id_in,
+        "fade_in_duration": int(fade_in_sec * 1_000_000),
+        "fade_out_duration": 0,
+        "type": "audio_fade"
+    }
+    if "audio_fades" not in data["materials"]:
+        data["materials"]["audio_fades"] = []
+    data["materials"]["audio_fades"].append(fade_obj_in)
+    first_seg["audio_fade"] = fade_id_in
+
+    last_seg = segments[-1]
+    fade_id_out = str(uuid.uuid4())
+    fade_obj_out = {
+        "id": fade_id_out,
+        "fade_in_duration": 0,
+        "fade_out_duration": int(fade_out_sec * 1_000_000),
+        "type": "audio_fade"
+    }
+    data["materials"]["audio_fades"].append(fade_obj_out)
+    last_seg["audio_fade"] = fade_id_out
+    
+    write_project(project_path, data)
+    return {
+        "fade_in_sec": fade_in_sec,
+        "fade_out_sec": fade_out_sec,
+        "track_id": music_track["id"]
+    }
+
+
+def apply_audio_crossfades(
+    project_path: str,
+    crossfade_sec: float = 1.0,
+) -> dict:
+    """Automatically crossfade adjacent audio clips on the music track."""
+    from capcut.writer import write_project
+    import uuid
+    data = read_project(project_path)
+    
+    music_track = None
+    max_dur = -1.0
+    for track in data.get("tracks", []):
+        if track.get("type") == "audio":
+            total_dur = 0.0
+            for seg in track.get("segments", []):
+                dur_us = seg.get("target_timerange", {}).get("duration", 0)
+                total_dur += dur_us / 1_000_000
+            if total_dur > max_dur:
+                max_dur = total_dur
+                music_track = track
+
+    if not music_track or len(music_track.get("segments", [])) < 2:
+        return {"crossfades_applied": 0}
+        
+    segments = music_track["segments"]
+    crossfades_count = 0
+    
+    if "audio_fades" not in data["materials"]:
+        data["materials"]["audio_fades"] = []
+        
+    for i in range(len(segments) - 1):
+        curr_seg = segments[i]
+        next_seg = segments[i + 1]
+        
+        fade_id_out = str(uuid.uuid4())
+        fade_obj_out = {
+            "id": fade_id_out,
+            "fade_in_duration": 0,
+            "fade_out_duration": int(crossfade_sec * 1_000_000),
+            "type": "audio_fade"
+        }
+        data["materials"]["audio_fades"].append(fade_obj_out)
+        curr_seg["audio_fade"] = fade_id_out
+        
+        fade_id_in = str(uuid.uuid4())
+        fade_obj_in = {
+            "id": fade_id_in,
+            "fade_in_duration": int(crossfade_sec * 1_000_000),
+            "fade_out_duration": 0,
+            "type": "audio_fade"
+        }
+        data["materials"]["audio_fades"].append(fade_obj_in)
+        next_seg["audio_fade"] = fade_id_in
+        
+        crossfades_count += 1
+        
+    write_project(project_path, data)
+    return {
+        "crossfades_applied": crossfades_count,
+        "crossfade_sec": crossfade_sec
+    }
+
