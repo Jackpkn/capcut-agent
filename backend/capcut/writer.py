@@ -24,6 +24,15 @@ def get_batch_state(project_path: str) -> dict | None:
     return None
 
 
+def get_session_memory_for_project(project_path: str):
+    from core.task_queue import _sessions
+    from core.session_memory import SessionMemory
+    for s in _sessions.values():
+        if str(s.project_path) == str(project_path):
+            return SessionMemory.from_dict(s.session_memory)
+    return SessionMemory()
+
+
 @contextmanager
 def batch_edits(project_path: str):
     """Apply many edits in memory, then write once to all draft files."""
@@ -369,8 +378,42 @@ def _catalog_fallback_asset(params: dict, asset_type: str, *, limit: int) -> dic
 
 
 def _resolve_asset(params: dict, asset_type: str, project_path: str | None = None) -> dict:
+    is_generic = False
+    if asset_type in ("transition", "effect"):
+        if not params.get("name") and not params.get("resource_id"):
+            q = (params.get("query") or "").lower().strip()
+            if not q or q in ("transition", "effect", "video transition", "video effect", "add transition", "add effect", "add a transition", "add a video transition", "add a video effect"):
+                is_generic = True
+
     asset = None
-    if params.get("resource_id"):
+    if is_generic and project_path:
+        try:
+            memory = get_session_memory_for_project(project_path)
+            preset = (memory.preset_id or "energetic").lower()
+            mood_map = {
+                "calm": "calm",
+                "cinematic": "calm",
+                "slow": "calm",
+                "energetic": "energetic",
+                "fast": "energetic",
+                "tiktok": "energetic",
+                "vlog": "fun",
+                "blog": "fun",
+                "travel": "fun",
+                "dramatic": "dramatic",
+            }
+            mood = mood_map.get(preset, "energetic")
+            from capcut.catalog import get_director_picks
+            picks = get_director_picks(mood)
+            candidates = picks.get("transitions" if asset_type == "transition" else "effects", [])
+            cached_candidates = [c for c in candidates if c.get("cached")]
+            if cached_candidates:
+                import random
+                asset = random.choice(cached_candidates)
+        except Exception as e:
+            logger.warning("Failed to auto-select smart FX: %s", e)
+
+    if not asset and params.get("resource_id"):
         asset = get_asset(resource_id=str(params["resource_id"]), asset_type=asset_type)
     if not asset and params.get("name"):
         asset = get_asset(name=params["name"], asset_type=asset_type)
@@ -1740,6 +1783,51 @@ def add_generated_image(
     return {"name": Path(image_path).name, "segment_id": segment_id, "at_sec": start_sec}
 
 
+def detect_audio_peaks(audio_path: str, fps: float = 100.0) -> list[float]:
+    """Run ffmpeg to extract raw audio amplitude and detect volume peaks (onsets)."""
+    import subprocess
+    from pathlib import Path
+    
+    if not audio_path or not Path(audio_path).exists():
+        return []
+
+    cmd = [
+        "ffmpeg", "-y", "-i", str(audio_path),
+        "-f", "s8", "-ac", "1", "-ar", str(int(fps)), "-"
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=10)
+        if proc.returncode != 0:
+            return []
+        data = proc.stdout
+    except Exception:
+        return []
+
+    # Signed 8-bit PCM values (-128 to 127) -> convert to absolute amplitudes (0 to 128)
+    amplitudes = [abs(b - 256 if b >= 128 else b) for b in data]
+    if not amplitudes:
+        return []
+
+    win_size = int(fps * 0.2) # 0.2s windows
+    peaks = []
+    
+    avg_amp = sum(amplitudes) / len(amplitudes)
+    threshold = max(avg_amp * 1.3, 10.0) # threshold for peak detection
+
+    for i in range(win_size, len(amplitudes) - win_size, win_size):
+        window = amplitudes[i : i + win_size]
+        max_val = max(window)
+        max_idx = i + window.index(max_val)
+        
+        # Local maxima check
+        prev_window = amplitudes[i - win_size : i]
+        next_window = amplitudes[i + win_size : i + 2 * win_size]
+        if max_val > threshold and max_val >= max(prev_window) and max_val >= max(next_window):
+            peaks.append(max_idx / fps)
+            
+    return peaks
+
+
 def sync_video_to_beats(
     project_path: str,
     bpm: float = 120.0,
@@ -1747,6 +1835,7 @@ def sync_video_to_beats(
 ) -> dict:
     """Align video segment transitions (ends) to background music beats."""
     from capcut.writer import write_project
+    from pathlib import Path
 
     data = read_project(project_path)
     
@@ -1760,29 +1849,63 @@ def sync_video_to_beats(
     if not video_track or not video_track.get("segments"):
         raise ValueError("No video clips found to sync")
 
-    # 2. Determine beat interval
+    # 2. Locate background music audio path to check for real peaks
+    music_track = None
+    max_dur = -1.0
+    for track in data.get("tracks", []):
+        if track.get("type") == "audio":
+            total_dur = 0.0
+            for seg in track.get("segments", []):
+                dur_us = seg.get("target_timerange", {}).get("duration", 0)
+                total_dur += dur_us / 1_000_000
+            if total_dur > max_dur:
+                max_dur = total_dur
+                music_track = track
+
+    audio_path = None
+    if music_track and music_track.get("segments"):
+        first_seg = music_track["segments"][0]
+        mat_id = first_seg.get("material_id")
+        if mat_id:
+            for aud in data.get("materials", {}).get("audios", []):
+                if aud.get("id") == mat_id:
+                    audio_path = aud.get("path")
+                    break
+
+    # 3. Detect peaks or fallback to BPM
+    peaks = []
+    if audio_path:
+        peaks = detect_audio_peaks(audio_path)
+
     interval = beat_interval
     if interval is None:
         interval = 60.0 / bpm
 
-    # 3. Align segments
+    # 4. Align segments
     segments = video_track["segments"]
     new_start = segments[0]["target_timerange"]["start"] / 1_000_000
     
     aligned_count = 0
+    used_peaks = False
+    
     for seg in segments:
         target = seg.get("target_timerange") or {}
         orig_dur = target.get("duration", 0) / 1_000_000
         orig_end = new_start + orig_dur
         
-        # Round to nearest beat interval
-        beat_idx = round(orig_end / interval)
-        new_end = beat_idx * interval
-        
-        # Minimum duration of 0.2s
-        if new_end <= new_start + 0.2:
-            new_end = new_start + 0.2
-            
+        if peaks:
+            valid_peaks = [p for p in peaks if p > new_start + 0.2]
+            if valid_peaks:
+                new_end = min(valid_peaks, key=lambda p: abs(p - orig_end))
+                used_peaks = True
+            else:
+                new_end = new_start + orig_dur
+        else:
+            beat_idx = round(orig_end / interval)
+            new_end = beat_idx * interval
+            if new_end <= new_start + 0.2:
+                new_end = new_start + 0.2
+              
         new_dur = new_end - new_start
         
         seg["target_timerange"]["start"] = int(new_start * 1_000_000)
@@ -1799,6 +1922,8 @@ def sync_video_to_beats(
     return {
         "aligned_clips": aligned_count,
         "beat_interval": interval,
-        "bpm": round(60.0 / interval, 2)
+        "bpm": round(60.0 / interval, 2) if not used_peaks else 0.0,
+        "used_audio_peaks": used_peaks,
+        "peak_count": len(peaks)
     }
 

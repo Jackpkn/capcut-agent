@@ -159,3 +159,139 @@ def test_sync_video_to_beats(monkeypatch):
     # So new end is 4.0s, new duration is 4.0 - 2.0 = 2.0s.
     assert segments[1]["target_timerange"]["start"] == 2_000_000
     assert segments[1]["target_timerange"]["duration"] == 2_000_000
+
+
+def test_detect_audio_peaks_mocked(monkeypatch):
+    import subprocess
+    from capcut.writer import detect_audio_peaks
+
+    class MockCompletedProcess:
+        def __init__(self, stdout, returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+    # Create 100 samples (1 second at 100fps)
+    # Put a peak of amplitude 120 at index 50 (0.5s), elsewhere amplitude 10
+    mock_samples = bytearray([10] * 100)
+    mock_samples[50] = 120
+
+    def mock_run(cmd, capture_output=True, timeout=10):
+        return MockCompletedProcess(bytes(mock_samples))
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+
+    peaks = detect_audio_peaks("/fake/audio.mp3")
+    assert len(peaks) > 0
+    # The peak should be around 0.5s
+    assert abs(peaks[0] - 0.5) < 0.15
+
+
+def test_sync_video_to_beats_with_audio_peaks(monkeypatch):
+    # Mock project draft info with a video track and a music audio clip
+    mock_data = {
+        "tracks": [
+            {
+                "id": "video_track_id",
+                "type": "video",
+                "segments": [
+                    {
+                        "id": "video_seg_1",
+                        "target_timerange": {"start": 0, "duration": 1_800_000}, # 1.8s
+                        "source_timerange": {"start": 0, "duration": 1_800_000},
+                        "speed": 1.0,
+                    }
+                ]
+            },
+            {
+                "id": "music_track_id",
+                "type": "audio",
+                "segments": [
+                    {
+                        "id": "music_seg",
+                        "material_id": "music_material",
+                        "target_timerange": {"start": 0, "duration": 20_000_000},
+                    }
+                ]
+            }
+        ],
+        "materials": {
+            "audios": [
+                {
+                    "id": "music_material",
+                    "path": "/fake/music.mp3"
+                }
+            ]
+        }
+    }
+
+    saved_data = {}
+
+    def mock_read(path):
+        return copy.deepcopy(mock_data)
+
+    def mock_write(path, data):
+        nonlocal saved_data
+        saved_data = data
+        return True
+
+    monkeypatch.setattr("capcut.writer.read_project", mock_read)
+    monkeypatch.setattr("capcut.writer.write_project", mock_write)
+    monkeypatch.setattr("pathlib.Path.exists", lambda self: True)
+    # Mock peak detection to return a peak at exactly 2.5s
+    monkeypatch.setattr("capcut.writer.detect_audio_peaks", lambda path: [2.5])
+
+    res = sync_video_to_beats("/fake/project/path")
+    assert res["used_audio_peaks"] is True
+    assert res["aligned_clips"] == 1
+
+    segments = saved_data["tracks"][0]["segments"]
+    # Video clip 1 should align to the peak at 2.5s
+    assert segments[0]["target_timerange"]["duration"] == 2_500_000
+
+
+def test_smart_fx_selection_with_preset_mood(monkeypatch):
+    from capcut.writer import _resolve_asset
+    from core.session_memory import SessionMemory
+
+    # Mock session memory with cinematic preset
+    mock_memory = SessionMemory(preset_id="cinematic")
+    monkeypatch.setattr("capcut.writer.get_session_memory_for_project", lambda p: mock_memory)
+
+    # Mock get_director_picks to return cinematic/calm transitions
+    mock_picks = {
+        "transitions": [
+            {"resource_id": "cinematic_transition_id", "name": "Cinematic Fade", "type": "transition", "cached": True}
+        ]
+    }
+    monkeypatch.setattr("capcut.catalog.get_director_picks", lambda m: mock_picks)
+    monkeypatch.setattr("capcut.writer.asset_exists_on_disk", lambda a: True)
+
+    params = {"query": "transition"}
+    asset = _resolve_asset(params, "transition", "/fake/project/path")
+    assert asset["resource_id"] == "cinematic_transition_id"
+    assert asset["name"] == "Cinematic Fade"
+
+
+def test_multimodal_subtitle_style_matching(monkeypatch):
+    import json
+    from agent.actions import _build_text_content
+    from core.session_memory import SessionMemory
+
+    # Mock session memory with custom caption formatting requirements
+    mock_memory = SessionMemory(
+        caption_direction="make yellow subtitles",
+        style_brief="large font spacing"
+    )
+    monkeypatch.setattr("capcut.writer.get_session_memory_for_project", lambda p: mock_memory)
+
+    text_json = _build_text_content("Hello World", project_path="/fake/project/path")
+    data = json.loads(text_json)
+
+    assert data["text"] == "Hello World"
+    style = data["styles"][0]
+    # Color should be yellow [1.0, 1.0, 0.0]
+    assert style["fill"]["content"]["solid"]["color"] == [1.0, 1.0, 0.0]
+    # Size should be large (24)
+    assert style["size"] == 24
+

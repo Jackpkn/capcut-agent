@@ -269,7 +269,7 @@ def _apply_via_legacy(project_path: str, op: dict) -> str:
         from agent.actions import _build_text_content, _get_existing_text_content
 
         existing = _get_existing_text_content(project_path, op["text_id"])
-        content = _build_text_content(op["content"], existing)
+        content = _build_text_content(op["content"], existing, project_path)
         update_text(project_path, op["text_id"], content)
         return f'Updated text'
 
@@ -281,7 +281,7 @@ def _apply_via_legacy(project_path: str, op: dict) -> str:
             existing = _get_existing_text_content(project_path, item["text_id"])
             updates.append({
                 "text_id": item["text_id"],
-                "content": _build_text_content(item["content"], existing),
+                "content": _build_text_content(item["content"], existing, project_path),
             })
         batch_update_texts(project_path, updates)
         return f"Updated {len(updates)} text overlay(s)"

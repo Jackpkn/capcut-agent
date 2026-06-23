@@ -33,7 +33,55 @@ from capcut.writer import (
 )
 
 
-def _build_text_content(plain_text: str, existing_content: str | None = None) -> str:
+def _build_text_content(
+    plain_text: str,
+    existing_content: str | None = None,
+    project_path: str | None = None,
+) -> str:
+    guidelines = []
+    if project_path:
+        try:
+            from capcut.writer import get_session_memory_for_project
+            memory = get_session_memory_for_project(project_path)
+            if memory.style_brief:
+                guidelines.append(memory.style_brief.lower())
+            if memory.caption_direction:
+                guidelines.append(memory.caption_direction.lower())
+            for c in memory.constraints:
+                guidelines.append(c.lower())
+        except Exception:
+            pass
+
+    color = [1.0, 1.0, 1.0]
+    for g in guidelines:
+        if "yellow" in g:
+            color = [1.0, 1.0, 0.0]
+            break
+        elif "red" in g:
+            color = [1.0, 0.0, 0.0]
+            break
+        elif "green" in g:
+            color = [0.0, 1.0, 0.0]
+            break
+        elif "blue" in g:
+            color = [0.0, 0.0, 1.0]
+            break
+        elif "cyan" in g:
+            color = [0.0, 1.0, 1.0]
+            break
+        elif "magenta" in g:
+            color = [1.0, 0.0, 1.0]
+            break
+
+    size = 15
+    for g in guidelines:
+        if "large" in g or "big" in g:
+            size = 24
+            break
+        elif "small" in g or "tiny" in g:
+            size = 10
+            break
+
     if existing_content:
         try:
             data = json.loads(existing_content)
@@ -42,6 +90,10 @@ def _build_text_content(plain_text: str, existing_content: str | None = None) ->
                 for style in data.get("styles", []):
                     if "range" in style:
                         style["range"] = [0, len(plain_text)]
+                    if color != [1.0, 1.0, 1.0]:
+                        style.setdefault("fill", {}).setdefault("content", {}).setdefault("solid", {})["color"] = color
+                    if size != 15:
+                        style["size"] = size
                 return json.dumps(data)
         except (json.JSONDecodeError, TypeError):
             pass
@@ -50,12 +102,12 @@ def _build_text_content(plain_text: str, existing_content: str | None = None) ->
         "styles": [{
             "fill": {
                 "content": {
-                    "solid": {"color": [1, 1, 1]},
+                    "solid": {"color": color},
                     "render_type": "solid",
                 }
             },
             "range": [0, len(plain_text)],
-            "size": 15,
+            "size": size,
         }],
         "text": plain_text,
     })
@@ -176,7 +228,7 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
 
     if action == "update_text":
         existing = _get_existing_text_content(project_path, params["text_id"])
-        content = _build_text_content(params["new_content"], existing)
+        content = _build_text_content(params["new_content"], existing, project_path)
         update_text(project_path, params["text_id"], content)
         return f'Updated text to "{params["new_content"]}"'
 
@@ -186,7 +238,7 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
             existing = _get_existing_text_content(project_path, item["text_id"])
             updates.append({
                 "text_id": item["text_id"],
-                "content": _build_text_content(item["new_content"], existing),
+                "content": _build_text_content(item["new_content"], existing, project_path),
             })
         batch_update_texts(project_path, updates)
         return f"Updated {len(updates)} text overlay(s)"
