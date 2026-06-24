@@ -6,6 +6,7 @@ import { AssistantMessage } from "./components/AssistantMessage";
 import type { EditorTimelinePayload } from "./components/EditorTimelineReport";
 import { TeamPlanCard, type TeamPlanPayload } from "./components/TeamPlanCard";
 import { ProjectAnalysisPanel } from "./components/ProjectAnalysisPanel";
+import { MediaUploadPanel } from "./components/MediaUploadPanel";
 import { TaskQueuePanel, type TeamGoal, type TeamTask } from "./components/TaskQueuePanel";
 
 const API = "http://localhost:8000";
@@ -1190,16 +1191,17 @@ export default function Home() {
 
   const sendMessage = async (
     text?: string,
-    opts?: { autoEdit?: boolean },
+    opts?: { autoEdit?: boolean; projectPath?: string },
   ) => {
     const autoEdit = opts?.autoEdit ?? false;
+    const projectPath = opts?.projectPath || selectedPath;
     const hint = (text ?? input).trim();
     const msg = autoEdit
       ? hint || "Travel vlog — captions, music, transitions"
       : hint;
     const imagesToSend = attachedImages.map((a) => a.base64);
     if ((!msg && !imagesToSend.length) || loading || autoEditing) return;
-    if (!selectedPath) {
+    if (!projectPath) {
       setError("Select a CapCut project in the sidebar first — timeline visuals need project data.");
       return;
     }
@@ -1255,7 +1257,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: msg || "Use the attached reference image(s) to guide this edit.",
-          project_path: selectedPath || undefined,
+          project_path: projectPath,
           force_team: teamMode && !autoEdit,
           auto_edit: autoEdit,
           trust_apply: trustApply,
@@ -1291,9 +1293,13 @@ export default function Home() {
     }
   };
 
-  const runAutoEdit = () => {
-    if (!selectedPath || loading || autoEditing) return;
-    sendMessage(undefined, { autoEdit: true });
+  const runAutoEdit = (pathOverride?: string) => {
+    const path = pathOverride || selectedPath;
+    if (!path || loading || autoEditing) return;
+    if (pathOverride && pathOverride !== selectedPath) {
+      setSelectedPath(pathOverride);
+    }
+    sendMessage(undefined, { autoEdit: true, projectPath: path });
   };
 
   const executeTeamApprove = async () => {
@@ -1562,8 +1568,21 @@ export default function Home() {
 
       {/* Left — Project */}
       <aside className="w-80 glass-panel rounded-2xl flex flex-col shrink-0 overflow-hidden z-10">
-        <div className="p-4 border-b border-white/5">
-          <p className="text-[10px] font-semibold text-capcut uppercase tracking-wider">Project</p>
+        <div className="p-4 border-b border-white/5 space-y-4">
+          <MediaUploadPanel
+            api={API}
+            exportProjectPath={selectedPath}
+            disabled={!connected || loading || autoEditing || executing}
+            onLog={(message, type) => log(message, type ?? "info")}
+            onProjectCreated={(path) => {
+              setSelectedPath(path);
+              void loadProjects();
+            }}
+            onAutoEdit={(path) => runAutoEdit(path)}
+          />
+
+          <div>
+            <p className="text-[10px] font-semibold text-capcut uppercase tracking-wider">Project</p>
           <div className="relative mt-2">
             <select
               className="input-field w-full text-xs px-3 py-2.5 cursor-pointer appearance-none"
@@ -1582,7 +1601,7 @@ export default function Home() {
           {selectedPath && (
             <div className="mt-4 space-y-2">
               <button
-                onClick={runAutoEdit}
+                onClick={() => runAutoEdit()}
                 disabled={autoEditing || loading || !selectedPath}
                 className="btn-primary w-full text-xs py-2.5 cursor-pointer bg-gradient-to-r from-[#00cbd6] to-[#0099a8] hover:from-[#00dce8] hover:to-[#00a8b8] border-0"
               >
@@ -1621,6 +1640,7 @@ export default function Home() {
               </button>
             </div>
           )}
+          </div>
         </div>
 
         <div className="px-4 py-3 border-b border-white/5 space-y-1.5">
@@ -1908,7 +1928,7 @@ export default function Home() {
               <div className="space-y-2">
                 <p className="text-sm font-medium text-white/95">What should we edit?</p>
                 <p className="text-xs text-white/55 leading-relaxed">
-                  Ask anything about your timeline, or describe edits. The orchestrator routes to Q&A, a single edit agent, or a sequential team for big jobs.
+                  Upload clips in the sidebar to start from scratch, or pick an existing CapCut project. Then describe edits in chat or hit Auto Edit.
                 </p>
               </div>
               {selectedPath && (
