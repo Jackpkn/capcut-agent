@@ -91,6 +91,26 @@ def ui_automation_enabled() -> bool:
         return False
 
 
+def accessibility_status() -> dict:
+    """Whether UI automation is allowed + setup hints for MCP/RPA."""
+    host = automation_host_app()
+    granted = ui_automation_enabled()
+    return {
+        "granted": granted,
+        "enabled": granted,
+        "host_app": host,
+        "hint": (
+            f"Enable **{host}** in System Settings → Privacy & Security → Accessibility. "
+            "Also allow Automation → System Events."
+        ),
+        "checklist": [
+            "System Settings → Privacy & Security → Accessibility → enable your terminal app.",
+            "Privacy & Security → Automation → allow the same app to control System Events.",
+            "Quit and reopen Terminal/Cursor after toggling.",
+        ],
+    }
+
+
 def accessibility_report() -> dict:
     try:
         host = automation_host_app()

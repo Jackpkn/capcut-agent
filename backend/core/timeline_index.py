@@ -21,6 +21,7 @@ class TimelineIndex:
     text_overlays: list[dict] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)
     effects: list[dict] = field(default_factory=list)
+    filters: list[dict] = field(default_factory=list)
     chapters: list[Chapter] = field(default_factory=list)
 
     @classmethod
@@ -43,6 +44,7 @@ class TimelineIndex:
             text_overlays=list(summary.get("text_overlays", [])),
             transitions=list(summary.get("transitions", [])),
             effects=list(summary.get("effects", [])),
+            filters=list(summary.get("filters", [])),
             chapters=chapters,
         )
 
@@ -56,6 +58,7 @@ class TimelineIndex:
             "text_overlay_count": len(self.text_overlays),
             "transition_count": len(self.transitions),
             "effect_count": len(self.effects),
+            "filter_count": len(self.filters),
             "chapters": [c.to_dict() for c in self.chapters],
             "clip_index": [
                 {
@@ -80,6 +83,7 @@ class TimelineIndex:
                 return c
         if 1 <= n <= len(self.video_clips):
             return self.video_clips[n - 1]
+         
         return None
 
     def clips_in_range(self, start_sec: float, end_sec: float) -> list[dict]:

@@ -249,6 +249,9 @@ def get_project_summary(project_path: str):
             "audio_clip_count": len(audio_clips),
             "transition_count": len(data["materials"].get("transitions", [])),
             "effect_count": len(data["materials"].get("video_effects", [])),
+            "filter_count": sum(
+                1 for e in data["materials"].get("video_effects", []) if e.get("type") == "filter"
+            ),
         },
         "text_overlays": text_overlays,
         "video_clips": video_clips,
@@ -268,5 +271,15 @@ def get_project_summary(project_path: str):
                 "type": e.get("type"),
             }
             for e in data["materials"].get("video_effects", [])
+            if e.get("type") != "filter"
+        ],
+        "filters": [
+            {
+                "id": e["id"],
+                "name": e["name"],
+                "type": e.get("type"),
+            }
+            for e in data["materials"].get("video_effects", [])
+            if e.get("type") == "filter"
         ],
     }

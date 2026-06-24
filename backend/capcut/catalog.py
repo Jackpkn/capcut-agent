@@ -25,7 +25,7 @@ CONTAINER_CACHE = (
     / "Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache"
 )
 
-ASSET_TYPES = ("music", "effect", "transition", "sticker", "text_template")
+ASSET_TYPES = ("music", "effect", "filter", "transition", "sticker", "text_template")
 
 
 def _cache_dirs() -> list[Path]:
@@ -212,13 +212,14 @@ def _index_from_projects(conn: sqlite3.Connection) -> int:
 
         for item in materials.get("video_effects", []):
             path = _resolve_path(item.get("path", ""))
+            is_filter = item.get("type") == "filter"
             _upsert(conn, {
                 "resource_id": item.get("resource_id") or item.get("effect_id"),
-                "name": item.get("name", "Effect"),
-                "type": "effect",
+                "name": item.get("name", "Filter" if is_filter else "Effect"),
+                "type": "filter" if is_filter else "effect",
                 "path": path,
                 "effect_id": item.get("effect_id"),
-                "material_type": item.get("type", "video_effect"),
+                "material_type": item.get("type", "filter" if is_filter else "video_effect"),
                 "category_name": item.get("category_name"),
                 "cached": bool(path and Path(path).exists()),
                 "source": "project",
@@ -287,6 +288,27 @@ def _index_from_projects(conn: sqlite3.Connection) -> int:
             })
             count += 1
 
+    return count
+
+
+def _seed_builtin_filters(conn: sqlite3.Connection) -> int:
+    from capcut.filters import VIDEO_FILTERS
+
+    count = 0
+    for slug, meta in VIDEO_FILTERS.items():
+        path = find_bundle_path(meta["resource_id"], "filter") or ""
+        _upsert(conn, {
+            "resource_id": meta["resource_id"],
+            "name": meta["name"],
+            "type": "filter",
+            "path": path,
+            "effect_id": meta["resource_id"],
+            "material_type": "filter",
+            "category_name": "Filter",
+            "cached": bool(path and Path(path).exists()),
+            "source": "builtin",
+        })
+        count += 1
     return count
 
 
@@ -409,6 +431,7 @@ def build_catalog() -> dict:
         _init_db(conn)
         conn.execute("DELETE FROM assets")
         effect_n = _index_effect_cache(conn)
+        filter_n = _seed_builtin_filters(conn)
         artist_n = _index_artist_effects(conn)
         music_n = _index_music_cache(conn)
         project_n = _index_from_projects(conn)
@@ -417,6 +440,7 @@ def build_catalog() -> dict:
         stats["build"] = {
             "project_rows": project_n,
             "cache_effect_rows": effect_n,
+            "builtin_filter_rows": filter_n,
             "cache_artist_rows": artist_n,
             "cache_music_rows": music_n,
             "built_at": time.time(),
@@ -424,6 +448,10 @@ def build_catalog() -> dict:
         return stats
     finally:
         conn.close()
+
+
+# Alias used by agents / older scripts
+rebuild_catalog = build_catalog
 
 
 def get_stats(conn: sqlite3.Connection | None = None) -> dict:
@@ -489,6 +517,8 @@ def search_catalog(
         "audio": ["music"],
         "effect": ["effect"],
         "effects": ["effect"],
+        "filter": ["filter"],
+        "filters": ["filter"],
         "transition": ["transition"],
         "transitions": ["transition"],
         "sticker": ["sticker"],

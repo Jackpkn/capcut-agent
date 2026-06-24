@@ -1532,14 +1532,221 @@ def reorder_clips(project_path: str, segment_id_a: str, segment_id_b: str):
 
 
 COLOR_PRESET_QUERIES: dict[str, str] = {
-    "cinematic": "cinematic film",
-    "warm": "warm tone",
-    "cool": "cool blue",
+    "cinematic": "dramatic",
+    "warm": "warm",
+    "cool": "cool",
     "vintage": "vintage",
     "vivid": "vivid",
-    "teal_orange": "teal orange",
-    "moody": "moody dark",
+    "teal_orange": "contrast",
+    "moody": "dramatic",
 }
+
+
+def _clear_existing_filters(data: dict) -> None:
+    """Remove prior colour filters so a new preset replaces instead of stacking."""
+    filter_mat_ids = {
+        item["id"]
+        for item in data.get("materials", {}).get("video_effects", [])
+        if item.get("type") == "filter"
+    }
+    if not filter_mat_ids:
+        return
+
+    data["materials"]["video_effects"] = [
+        item
+        for item in data.get("materials", {}).get("video_effects", [])
+        if item.get("id") not in filter_mat_ids
+    ]
+    for track in data.get("tracks", []):
+        if track.get("type") == "filter":
+            track["segments"] = []
+        elif track.get("type") == "effect":
+            track["segments"] = [
+                seg
+                for seg in track.get("segments", [])
+                if seg.get("material_id") not in filter_mat_ids
+            ]
+
+
+def _resolve_filter_asset(preset: str, project_path: str) -> dict:
+    """Resolve a colour preset to a CapCut filter asset (never a VFX scene effect)."""
+    from capcut.filters import filter_meta, resolve_filter_slug
+
+    slug = resolve_filter_slug(preset)
+    meta = filter_meta(slug)
+    asset = {
+        "slug": slug,
+        "resource_id": meta["resource_id"],
+        "effect_id": meta["effect_id"],
+        "name": meta["name"],
+        "type": "filter",
+        "category_name": "Filter",
+    }
+
+    hit = get_asset(resource_id=meta["resource_id"], asset_type="filter")
+    if not hit:
+        hit = get_asset(name=meta["name"], asset_type="filter")
+
+    path = (hit or {}).get("path")
+    if not path or not Path(path).exists():
+        path = find_bundle_path(meta["resource_id"], "filter")
+
+    if path and Path(path).exists():
+        asset["path"] = path
+        asset["cached"] = True
+        return asset
+
+    # Built-in filters work in CapCut by resource_id even without a local bundle.
+    asset["path"] = ""
+    asset["cached"] = False
+
+    try:
+        return ensure_asset_cached(asset, project_path=project_path)
+    except Exception as exc:
+        logger.info(
+            'Filter "%s" not cached locally (%s) — applying by built-in resource id',
+            meta["name"],
+            exc,
+        )
+        return asset
+
+
+def add_filter(
+    project_path: str,
+    preset: str,
+    start_sec: float = 0,
+    duration_sec: float | None = None,
+    intensity: float = 1.0,
+    track_name: str = "filter",
+) -> dict:
+    """Apply a CapCut colour filter on the dedicated filter track."""
+    from capcut.reader import get_project_summary
+
+    asset = _resolve_filter_asset(preset, project_path)
+    summary = get_project_summary(project_path)
+    dur = duration_sec or summary.get("overview", {}).get("duration_sec") or 30.0
+    duration_us = int(dur * 1_000_000)
+    start_us = int(start_sec * 1_000_000)
+
+    data = read_project(project_path)
+    _clear_existing_filters(data)
+
+    template = _find_material_template("video_effects", asset["resource_id"], project_path)
+    material_id = _new_id()
+    segment_id = _new_id()
+
+    material = copy.deepcopy(template) if template and template.get("type") == "filter" else {}
+    material.update({
+        "id": material_id,
+        "effect_id": asset["resource_id"],
+        "resource_id": asset["resource_id"],
+        "name": asset["name"],
+        "type": "filter",
+        "sub_type": 0,
+        "bind_segment_id": "",
+        "transparent_params": "",
+        "path": asset.get("path") or "",
+        "value": intensity,
+        "category_id": template.get("category_id", "") if template else "",
+        "category_name": "Filter",
+        "platform": "all",
+        "apply_target_type": 2,
+        "source_platform": 0 if not asset.get("cached") else 1,
+        "version": "",
+        "item_effect_type": 0,
+        "adjust_params": [],
+        "time_range": None,
+        "formula_id": "",
+        "apply_time_range": None,
+        "render_index": 11000,
+        "track_render_index": 0,
+        "common_keyframes": [],
+        "request_id": "",
+        "algorithm_artifact_path": "",
+        "disable_effect_faces": [],
+        "covering_relation_change": 0,
+        "enable_mask": True,
+        "effect_mask": [],
+        "enable_video_mask_stroke": True,
+        "enable_video_mask_shadow": True,
+    })
+    data["materials"].setdefault("video_effects", []).append(material)
+
+    filter_track = next(
+        (t for t in data["tracks"] if t.get("type") == "filter" and t.get("name") == track_name),
+        None,
+    )
+    if not filter_track:
+        filter_track = {
+            "id": _new_id(),
+            "type": "filter",
+            "name": track_name,
+            "attribute": 0,
+            "segments": [],
+            "is_default_name": track_name == "filter",
+            "flag": 0,
+        }
+        data["tracks"].append(filter_track)
+
+    seg_template = _segment_template(data, "filter") or _segment_template(data, "effect") or {}
+    segment = copy.deepcopy(seg_template)
+    segment.update({
+        "id": segment_id,
+        "material_id": material_id,
+        "raw_segment_id": filter_track["id"],
+        "source_timerange": {"start": 0, "duration": duration_us},
+        "target_timerange": {"start": start_us, "duration": duration_us},
+        "render_timerange": {"start": 0, "duration": 0},
+        "speed": 1.0,
+        "volume": 1.0,
+        "visible": True,
+        "reverse": False,
+        "clip": None,
+        "render_index": 11000,
+        "track_render_index": 0,
+        "track_attribute": 0,
+        "extra_material_refs": [],
+        "common_keyframes": [],
+        "keyframe_refs": [],
+        "enable_lut": False,
+        "enable_adjust": False,
+        "enable_hsl": False,
+        "enable_color_curves": True,
+        "enable_hsl_curves": True,
+        "enable_color_wheels": True,
+    })
+    filter_track["segments"].append(segment)
+
+    write_project(project_path, data)
+    return {
+        "material_id": material_id,
+        "segment_id": segment_id,
+        "track_id": filter_track["id"],
+        "name": asset["name"],
+        "slug": asset["slug"],
+        "preset": preset,
+        "cached": asset.get("cached", False),
+    }
+
+
+def apply_color_preset(
+    project_path: str,
+    preset: str,
+    start_sec: float = 0,
+    duration_sec: float | None = None,
+    bind_segment_id: str | None = None,
+) -> dict:
+    if bind_segment_id:
+        logger.warning(
+            "Per-clip colour filters are not supported yet; applying '%s' across the timeline",
+            preset,
+        )
+    return add_filter(
+        project_path,
+        preset=preset,
+        start_sec=start_sec,
+        duration_sec=duration_sec,
+    )
 
 
 def split_clip(project_path: str, segment_id: str, at_sec: float) -> str:
@@ -1700,28 +1907,6 @@ def duck_audio(
         "volume": volume,
         "ducked_segments": len(ducked_segment_ids)
     }
-
-
-def apply_color_preset(
-    project_path: str,
-    preset: str,
-    start_sec: float = 0,
-    duration_sec: float | None = None,
-    bind_segment_id: str | None = None,
-) -> dict:
-    from capcut.reader import get_project_summary
-
-    key = preset.lower().replace(" ", "_").replace("-", "_")
-    query = COLOR_PRESET_QUERIES.get(key, preset)
-    summary = get_project_summary(project_path)
-    dur = duration_sec or summary.get("overview", {}).get("duration_sec") or 30.0
-    return add_effect(
-        project_path,
-        query=query,
-        start_sec=start_sec,
-        duration_sec=dur,
-        bind_segment_id=bind_segment_id,
-    )
 
 
 def add_generated_image(
@@ -1989,30 +2174,39 @@ def fade_project_music(
         raise ValueError("No audio/music track found to fade")
         
     segments = music_track["segments"]
-    
-    first_seg = segments[0]
-    fade_id_in = str(uuid.uuid4())
-    fade_obj_in = {
-        "id": fade_id_in,
-        "fade_in_duration": int(fade_in_sec * 1_000_000),
-        "fade_out_duration": 0,
-        "type": "audio_fade"
-    }
     if "audio_fades" not in data["materials"]:
         data["materials"]["audio_fades"] = []
-    data["materials"]["audio_fades"].append(fade_obj_in)
-    first_seg["audio_fade"] = fade_id_in
 
+    first_seg = segments[0]
     last_seg = segments[-1]
-    fade_id_out = str(uuid.uuid4())
-    fade_obj_out = {
-        "id": fade_id_out,
-        "fade_in_duration": 0,
-        "fade_out_duration": int(fade_out_sec * 1_000_000),
-        "type": "audio_fade"
-    }
-    data["materials"]["audio_fades"].append(fade_obj_out)
-    last_seg["audio_fade"] = fade_id_out
+
+    if first_seg is last_seg:
+        fade_id = str(uuid.uuid4())
+        data["materials"]["audio_fades"].append({
+            "id": fade_id,
+            "fade_in_duration": int(fade_in_sec * 1_000_000),
+            "fade_out_duration": int(fade_out_sec * 1_000_000),
+            "type": "audio_fade",
+        })
+        first_seg["audio_fade"] = fade_id
+    else:
+        fade_id_in = str(uuid.uuid4())
+        data["materials"]["audio_fades"].append({
+            "id": fade_id_in,
+            "fade_in_duration": int(fade_in_sec * 1_000_000),
+            "fade_out_duration": 0,
+            "type": "audio_fade",
+        })
+        first_seg["audio_fade"] = fade_id_in
+
+        fade_id_out = str(uuid.uuid4())
+        data["materials"]["audio_fades"].append({
+            "id": fade_id_out,
+            "fade_in_duration": 0,
+            "fade_out_duration": int(fade_out_sec * 1_000_000),
+            "type": "audio_fade",
+        })
+        last_seg["audio_fade"] = fade_id_out
     
     write_project(project_path, data)
     return {

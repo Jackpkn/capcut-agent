@@ -17,6 +17,8 @@ PANEL_NAMES = {
     "transitions": "VETreeMainCellItem:Music",
     "sticker": "VETreeMainCellItem:Music",
     "stickers": "VETreeMainCellItem:Music",
+    "filter": "VETreeMainCellItem:Filters",
+    "filters": "VETreeMainCellItem:Filters",
     "text_template": "VETreeMainCellItem:Music",
     "text": "VETreeMainCellItem:Music",
 }
