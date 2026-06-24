@@ -408,6 +408,48 @@ def test_fade_project_music(monkeypatch):
     assert fade_out_obj["fade_out_duration"] == 3_000_000
 
 
+def test_fade_project_music_single_segment(monkeypatch):
+    from capcut.writer import fade_project_music
+
+    mock_data = {
+        "tracks": [
+            {
+                "id": "audio_track_id",
+                "type": "audio",
+                "segments": [
+                    {
+                        "id": "music_seg_1",
+                        "target_timerange": {"start": 0, "duration": 20_000_000},
+                    }
+                ],
+            }
+        ],
+        "materials": {},
+    }
+
+    saved_data = {}
+
+    def mock_read(path):
+        return copy.deepcopy(mock_data)
+
+    def mock_write(path, data):
+        nonlocal saved_data
+        saved_data = data
+        return True
+
+    monkeypatch.setattr("capcut.writer.read_project", mock_read)
+    monkeypatch.setattr("capcut.writer.write_project", mock_write)
+
+    fade_project_music("/fake/project/path", fade_in_sec=2.0, fade_out_sec=0.0)
+
+    seg = saved_data["tracks"][0]["segments"][0]
+    fades = saved_data["materials"]["audio_fades"]
+    assert len(fades) == 1
+    fade_obj = next(f for f in fades if f["id"] == seg["audio_fade"])
+    assert fade_obj["fade_in_duration"] == 2_000_000
+    assert fade_obj["fade_out_duration"] == 0
+
+
 def test_apply_audio_crossfades(monkeypatch):
     from capcut.writer import apply_audio_crossfades
 
