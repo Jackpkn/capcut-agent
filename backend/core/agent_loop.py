@@ -482,6 +482,27 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
             })
 
             qa = review_task(task, session.project_path)
+            if not qa["approved"]:
+                yield sse_line({
+                    "type": "step",
+                    "id": f"qa_{task.id}",
+                    "status": "running",
+                    "label": f"QA — Flagged issues on {task.description[:30]}… Running self-correction",
+                    "detail": "; ".join(qa["issues"]),
+                })
+                from agent.reflection_agent import self_correct_task
+                corrected = self_correct_task(
+                    task,
+                    qa["issues"],
+                    session.project_path,
+                    session.timeline_summary,
+                )
+                if corrected:
+                    task.params = corrected
+                    qa = review_task(task, session.project_path)
+                    if qa["approved"]:
+                        task.agent_reasoning += " [Self-corrected by Reflection Agent]"
+
             task.qa_feedback = qa["issues"]
             task.qa_approved = qa["approved"]
 
@@ -489,8 +510,8 @@ def iter_team_sse(session_id: str) -> Iterator[str]:
                 "type": "step",
                 "id": f"qa_{task.id}",
                 "status": "done" if qa["approved"] else "error",
-                "label": f"QA — {task.description[:48]}",
-                "detail": "; ".join(qa["issues"]) if qa["issues"] else None,
+                "label": f"QA — {task.description[:48]} (Self-corrected)" if "[Self-corrected by Reflection Agent]" in task.agent_reasoning else f"QA — {task.description[:48]}",
+                "detail": "; ".join(qa["issues"]) if qa["issues"] else ("Self-corrected successfully" if "[Self-corrected by Reflection Agent]" in task.agent_reasoning else None),
             })
 
             if qa["approved"]:

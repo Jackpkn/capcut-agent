@@ -92,3 +92,96 @@ def reflect_chapter(
             skip_task_ids=[str(x) for x in args.get("skip_task_ids") or []],
         )
     return None
+
+
+CORRECT_TASK_TOOL = [{
+    "type": "function",
+    "name": "correct_task_parameters",
+    "description": "Correct the parameters of a failed task to resolve QA validation issues.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "params": {
+                "type": "object",
+                "description": "The corrected, complete parameter dictionary for the task action.",
+            },
+            "explanation": {
+                "type": "string",
+                "description": "Short explanation of why these parameters were changed and how they resolve the issue.",
+            },
+        },
+        "required": ["params", "explanation"],
+    },
+}]
+
+
+def self_correct_task(
+    task: any,
+    issues: list[str],
+    project_path: str,
+    timeline_summary: dict,
+) -> dict | None:
+    """Use the Reflection Agent to analyze QA issues and return corrected parameters."""
+    from core.slices import get_slice_for_task_type
+    try:
+        slice_data = get_slice_for_task_type(project_path, task.type.value)
+    except Exception as exc:
+        logger.warning("Could not retrieve slice data for self-correction: %s", exc)
+        slice_data = {}
+
+    payload = {
+        "task_id": task.id,
+        "action": task.action,
+        "description": task.description,
+        "instruction": task.instruction,
+        "current_params": task.params,
+        "validation_errors": issues,
+        "timeline_slice": slice_data,
+    }
+
+    instructions = (
+        "You are the CapCut Reflection and Self-Correction Agent.\n"
+        "A proposed task has failed QA validation. Your goal is to analyze the validation errors "
+        "and correct the task parameters using the provided timeline slice context.\n\n"
+        "Common corrections:\n"
+        "- Mismatched/NotFound segment_id: Look at the timeline_slice, find the correct segment_id "
+        "based on the clip description/index, and replace it.\n"
+        "- Out-of-range values: Adjust volume, speed, or durations to fit within acceptable ranges.\n"
+        "- Duplicate or invalid queries: Adjust parameters to meet constraints.\n\n"
+        "Call correct_task_parameters with the corrected params and a brief explanation."
+    )
+
+    try:
+        response = call_model(
+            instructions=instructions,
+            input_items=[{
+                "role": "user",
+                "content": json.dumps(payload, indent=2),
+            }],
+            tools=CORRECT_TASK_TOOL,
+            temperature=0.2,
+            max_output_tokens=512,
+            agent="Reflection Agent",
+            think=False,
+        )
+    except Exception as exc:
+        logger.warning("Self-correction LLM call failed: %s", exc)
+        return None
+
+    if response is None:
+        return None
+
+    for item in response.output:
+        if item.type != "function_call" or item.name != "correct_task_parameters":
+            continue
+        try:
+            args = json.loads(item.arguments or "{}")
+            corrected_params = args.get("params")
+            explanation = args.get("explanation")
+            logger.info("Reflection Agent self-corrected task %s. Explanation: %s", task.id, explanation)
+            return corrected_params
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
