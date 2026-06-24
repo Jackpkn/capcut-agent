@@ -209,6 +209,18 @@ def describe_action(action: str, params: dict) -> str:
     if action == "draft_operations":
         from capcut.draft_ops import describe_operations
         return describe_operations(params.get("operations", []))
+    if action == "execute_capcut_script":
+        lines = (params.get("code") or "").strip().splitlines()
+        preview = lines[0][:60] if lines else "custom script"
+        return f"Run CapCut script: {preview}…"
+    if action == "rpa_capcut":
+        return f"RPA: {params.get('rpa_action', params.get('action', ''))}"
+    if action == "verify_project":
+        keys = list((params.get("expectations") or {}).keys())
+        return f"Verify project ({', '.join(keys) or 'defaults'})"
+    if action == "import_clips":
+        n = len(params.get("media_paths") or params.get("paths") or [])
+        return f"Import {n} clip(s) onto timeline"
     return f"{action}: {json.dumps(params)}"
 
 
@@ -596,6 +608,50 @@ def execute_action(action: str, params: dict, project_path: str) -> str:
 
         results = apply_draft_operations(project_path, params.get("operations", []))
         return "; ".join(results) if results else "No operations applied"
+
+    if action == "execute_capcut_script":
+        from capcut.scripting import execute_capcut_script
+
+        result = execute_capcut_script(
+            project_path,
+            params.get("code", ""),
+            timeout_sec=float(params.get("timeout_sec", 30.0)),
+        )
+        stdout = result.get("stdout") or ""
+        suffix = f" stdout: {stdout[:200]}" if stdout else ""
+        return f"Script OK — result={result.get('result')!r}{suffix}"
+
+    if action == "rpa_capcut":
+        from capcut.rpa import execute_rpa
+
+        result = execute_rpa(
+            params.get("rpa_action", params.get("action", "")),
+            project_path,
+            clip_name=params.get("clip_name", ""),
+            output_path=params.get("output_path"),
+        )
+        if not result.get("success"):
+            raise RuntimeError(result.get("error") or result.get("hint") or "RPA failed")
+        return f"RPA {result.get('action')}: {result.get('detail', 'ok')}"
+
+    if action == "verify_project":
+        from capcut.verify import verify_project as capcut_verify
+
+        report = capcut_verify(project_path, params.get("expectations", {}))
+        if not report.get("passed"):
+            failed = [c["check"] for c in report.get("checks", []) if not c.get("ok")]
+            raise RuntimeError(f"Verification failed: {', '.join(failed)}")
+        return f"Verification passed ({len(report.get('checks', []))} checks)"
+
+    if action == "import_clips":
+        from capcut.ingest import import_clips
+
+        result = import_clips(
+            project_path,
+            params.get("media_paths") or params.get("paths") or [],
+            photo_duration_sec=float(params.get("photo_duration_sec", 3.0)),
+        )
+        return f"Imported {result['imported_count']} clip(s) — timeline {result['timeline_duration_sec']:.1f}s"
 
     raise ValueError(f"Unknown action: {action}")
 

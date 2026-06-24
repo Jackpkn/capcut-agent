@@ -15,6 +15,7 @@ class TaskType(str, Enum):
     TEXT = "text"
     EFFECTS = "effects"
     ASSETS = "assets"
+    RPA = "rpa"
     QA = "qa"
 
 
@@ -65,6 +66,10 @@ ACTION_DOMAIN: dict[str, TaskType] = {
     "apply_audio_crossfades": TaskType.AUDIO,
     "sync_video_to_beats": TaskType.VIDEO,
     "apply_color_preset": TaskType.EFFECTS,
+    "import_clips": TaskType.VIDEO,
+    "execute_capcut_script": TaskType.VIDEO,
+    "rpa_capcut": TaskType.RPA,
+    "verify_project": TaskType.QA,
     "generate_image": TaskType.ASSETS,
     "generate_video_clip": TaskType.ASSETS,
 }
@@ -75,6 +80,7 @@ SPECIALIST_FOR_TYPE: dict[TaskType, str] = {
     TaskType.TEXT: "Text Agent",
     TaskType.EFFECTS: "FX Agent",
     TaskType.ASSETS: "Assets Agent",
+    TaskType.RPA: "RPA Agent",
     TaskType.QA: "QA Agent",
 }
 

@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -87,9 +87,94 @@ class CatalogDownloadRequest(BaseModel):
     project_path: str | None = None
 
 
+class CreateFromMediaRequest(BaseModel):
+    media_paths: list[str]
+    project_name: str | None = None
+    photo_duration_sec: float = 3.0
+
+
+class ImportClipsRequest(BaseModel):
+    project_path: str
+    media_paths: list[str]
+    photo_duration_sec: float = 3.0
+
+
+class ExportRequest(BaseModel):
+    project_path: str
+    output_path: str | None = None
+
+
 @app.get("/projects")
 def list_projects():
     return get_all_projects()
+
+
+@app.post("/media/upload")
+async def upload_media(files: list[UploadFile] = File(...)):
+    """Upload video/photo/audio files for project creation or import."""
+    from capcut.ingest import save_upload
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+    saved: list[dict] = []
+    for f in files:
+        content = await f.read()
+        if not content:
+            continue
+        path = save_upload(f.filename or "upload.bin", content)
+        saved.append({"name": f.filename, "path": path, "size": len(content)})
+    if not saved:
+        raise HTTPException(status_code=400, detail="All uploads were empty")
+    return {"files": saved, "count": len(saved)}
+
+
+@app.post("/projects/create-from-media")
+def create_project_from_media_endpoint(req: CreateFromMediaRequest):
+    """Create a new CapCut project from uploaded media files."""
+    from capcut.ingest import create_project_from_media
+
+    try:
+        return create_project_from_media(
+            req.media_paths,
+            project_name=req.project_name,
+            photo_duration_sec=req.photo_duration_sec,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("create-from-media failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/project/import-clips")
+def import_clips_endpoint(req: ImportClipsRequest):
+    """Import media files into an existing CapCut project timeline."""
+    from capcut.ingest import import_clips
+
+    try:
+        return import_clips(
+            req.project_path,
+            req.media_paths,
+            photo_duration_sec=req.photo_duration_sec,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("import-clips failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/project/export")
+def export_project_endpoint(req: ExportRequest):
+    """Trigger CapCut export via RPA (requires Accessibility permission)."""
+    from capcut.rpa import execute_rpa
+
+    try:
+        return execute_rpa("export", req.project_path, output_path=req.output_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/project/summary")
