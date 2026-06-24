@@ -26,3 +26,7 @@
 
 # Runtime local stores
 backend/data/*.db
+
+# Unrelated / local-only (not part of capcut-agent)
+hagiang-website/
+.cursor/
